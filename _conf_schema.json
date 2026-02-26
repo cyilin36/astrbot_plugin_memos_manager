@@ -1,0 +1,43 @@
+{
+  "memos_base_url": {
+    "type": "string",
+    "description": "Memos site URL, e.g. https://memos.example.com",
+    "hint": "Do not include API token in URL. /api/v1 is auto-appended if missing.",
+    "default": ""
+  },
+  "memos_token": {
+    "type": "string",
+    "description": "Memos access token (Bearer token)",
+    "hint": "Create token in your Memos account settings.",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "default_visibility": {
+    "type": "string",
+    "description": "Default memo visibility",
+    "options": ["workspace", "private", "public"],
+    "default": "workspace"
+  },
+  "search_max_count": {
+    "type": "int",
+    "description": "memos_search max recent memo pool size",
+    "hint": "Each search only considers the latest N memos in descending time order.",
+    "default": 50
+  },
+  "enable_ai_audit_log": {
+    "type": "bool",
+    "description": "Return compact execution audit logs in tool output",
+    "default": true
+  },
+  "ai_audit_log_max_chars": {
+    "type": "int",
+    "description": "Maximum characters for returned audit log text",
+    "default": 2000
+  },
+  "log_level": {
+    "type": "string",
+    "description": "Plugin log verbosity",
+    "options": ["DEBUG", "INFO", "ERROR"],
+    "default": "INFO"
+  }
+}

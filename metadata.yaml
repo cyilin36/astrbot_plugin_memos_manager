@@ -1,0 +1,6 @@
+name: astrbot_plugin_memos_manager
+display_name: Memos Manager
+description: Manage usememos/memos with LLM tools (search/create/update/delete).
+version: 0.1
+author: astrbot_plugin_memos_manager
+repo: ""
