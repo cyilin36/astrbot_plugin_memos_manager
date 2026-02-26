@@ -94,19 +94,40 @@ class MemosClient:
         except ValueError as exc:
             raise MemosClientError(f"invalid json response on {method} {path}") from exc
 
-    async def list_recent_memos(self, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:
+    async def list_memos_page(
+        self,
+        *,
+        page_size: int,
+        page_token: str | None = None,
+        include_archived: bool = False,
+        old_filter: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         state = "ARCHIVED" if include_archived else "NORMAL"
-        params = {
-            "pageSize": max(1, int(limit)),
+        params: dict[str, Any] = {
+            "pageSize": max(1, int(page_size)),
             "state": state,
             "sort": "display_time",
             "direction": "DESC",
         }
+        if page_token:
+            params["pageToken"] = page_token
+        if old_filter:
+            params["old_filter"] = old_filter
         data = await self._request("GET", "/memos", params=params)
         memos = data.get("memos", [])
         if not isinstance(memos, list):
-            raise MemosClientError("invalid memos list in list_recent_memos")
-        return [self._sanitize_memo(m) for m in memos[:limit] if isinstance(m, dict)]
+            raise MemosClientError("invalid memos list in list_memos_page")
+        next_page_token = data.get("nextPageToken")
+        if not isinstance(next_page_token, str) or not next_page_token:
+            next_page_token = None
+        return [self._sanitize_memo(m) for m in memos if isinstance(m, dict)], next_page_token
+
+    async def list_recent_memos(self, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:
+        memos, _ = await self.list_memos_page(
+            page_size=max(1, int(limit)),
+            include_archived=include_archived,
+        )
+        return memos[:limit]
 
     async def create_memo(self, content: str, visibility: str) -> dict[str, Any]:
         payload = {

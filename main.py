@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -64,6 +65,49 @@ class MemosManagerPlugin(Star):
     def _trace_id(self) -> str:
         return uuid.uuid4().hex[:10]
 
+    def _local_tz(self):
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
+    def _parse_date_bound(self, raw: str | None, *, is_end: bool) -> datetime | None:
+        if raw is None:
+            return None
+        text = raw.strip()
+        if not text:
+            return None
+        tz = self._local_tz()
+        try:
+            if len(text) == 10:
+                day = date.fromisoformat(text)
+                if is_end:
+                    dt = datetime.combine(day, time(23, 59, 59), tzinfo=tz)
+                else:
+                    dt = datetime.combine(day, time(0, 0, 0), tzinfo=tz)
+            else:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+            return dt.astimezone(timezone.utc)
+        except ValueError as exc:
+            raise ValueError(f"invalid date format: {raw}") from exc
+
+    def _parse_memo_time(self, raw: Any) -> datetime | None:
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _memo_match_keyword(memo: dict[str, Any], query: str) -> bool:
+        q_cf = query.casefold()
+        content = str(memo.get("content", ""))
+        snippet = str(memo.get("snippet", ""))
+        tags = memo.get("tags", [])
+        tags_text = " ".join(tags) if isinstance(tags, list) else ""
+        haystack = f"{content}\n{snippet}\n{tags_text}".casefold()
+        return q_cf in haystack
+
     def _build_client(self) -> MemosClient:
         return MemosClient(
             base_url=self._cfg_str("memos_base_url"),
@@ -91,61 +135,147 @@ class MemosManagerPlugin(Star):
             payload["metrics"] = metrics
         return payload
 
-    async def run_search(self, query: str | None, include_archived: bool = False) -> dict[str, Any]:
+    async def run_search(
+        self,
+        query: str | None,
+        include_archived: bool = False,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        date_field: str = "display_time",
+    ) -> dict[str, Any]:
         trace_id = self._trace_id()
         steps: list[str] = []
         search_max_count = self._cfg_int("search_max_count", 50)
+        selected_date_field = (date_field or "display_time").strip().lower()
+        if selected_date_field not in {"display_time", "create_time", "update_time"}:
+            selected_date_field = "display_time"
         steps.append(
             f"start memos_search trace={trace_id} query_present={bool(query and query.strip())} "
-            f"include_archived={include_archived} search_max_count={search_max_count}"
+            f"include_archived={include_archived} search_max_count={search_max_count} "
+            f"start_date={start_date!r} end_date={end_date!r} date_field={selected_date_field}"
         )
         try:
-            client = self._build_client()
-            memos = await client.list_recent_memos(
-                limit=search_max_count,
-                include_archived=include_archived,
-            )
-            steps.append(f"fetched_recent_memos count={len(memos)}")
+            start_dt = self._parse_date_bound(start_date, is_end=False)
+            end_dt = self._parse_date_bound(end_date, is_end=True)
+            if start_dt and end_dt and start_dt > end_dt:
+                return {
+                    "ok": False,
+                    "trace_id": trace_id,
+                    "result": {},
+                    "audit": self._build_audit(trace_id, steps + ["error invalid_range start_after_end"]),
+                    "errors": ["start_date must be earlier than or equal to end_date"],
+                }
 
-            if query and query.strip():
-                q = query.strip()
-                filtered = []
-                q_cf = q.casefold()
-                for memo in memos:
-                    content = str(memo.get("content", ""))
-                    snippet = str(memo.get("snippet", ""))
-                    tags = memo.get("tags", [])
-                    tags_text = " ".join(tags) if isinstance(tags, list) else ""
-                    haystack = f"{content}\n{snippet}\n{tags_text}".casefold()
-                    if q_cf in haystack:
-                        filtered.append(memo)
-                memos = filtered
-                steps.append(f"keyword_filter_applied query={q!r} matched={len(memos)}")
-                query_mode = "keyword"
+            client = self._build_client()
+
+            old_filter_parts: list[str] = []
+            if selected_date_field == "display_time":
+                if start_dt is not None:
+                    old_filter_parts.append(f"display_time_after == {int(start_dt.timestamp())}")
+                if end_dt is not None:
+                    old_filter_parts.append(f"display_time_before == {int(end_dt.timestamp())}")
+            old_filter = " && ".join(old_filter_parts) if old_filter_parts else None
+
+            query_text = (query or "").strip()
+            query_mode = "keyword" if query_text else "recent"
+
+            page_size = 100
+            page_token: str | None = None
+            scanned_count = 0
+            date_filtered_count = 0
+            keyword_filtered_count = 0
+            page_count = 0
+            result_memos: list[dict[str, Any]] = []
+
+            while True:
+                page_count += 1
+                memos_page, next_page_token = await client.list_memos_page(
+                    page_size=page_size,
+                    page_token=page_token,
+                    include_archived=include_archived,
+                    old_filter=old_filter,
+                )
+                if not memos_page:
+                    break
+                scanned_count += len(memos_page)
+
+                date_kept: list[dict[str, Any]] = []
+                for memo in memos_page:
+                    if selected_date_field != "display_time":
+                        target_dt = self._parse_memo_time(memo.get(selected_date_field))
+                        if target_dt is None:
+                            continue
+                        if start_dt is not None and target_dt < start_dt:
+                            continue
+                        if end_dt is not None and target_dt > end_dt:
+                            continue
+                    date_kept.append(memo)
+                date_filtered_count += len(date_kept)
+
+                if query_text:
+                    keyword_kept = [m for m in date_kept if self._memo_match_keyword(m, query_text)]
+                else:
+                    keyword_kept = date_kept
+                keyword_filtered_count += len(keyword_kept)
+
+                for memo in keyword_kept:
+                    result_memos.append(memo)
+                    if len(result_memos) >= search_max_count:
+                        break
+
+                if len(result_memos) >= search_max_count:
+                    steps.append("stop_reason=reach_search_max_count")
+                    break
+                if not next_page_token:
+                    steps.append("stop_reason=no_more_pages")
+                    break
+                page_token = next_page_token
+
+            if query_text:
+                steps.append(f"keyword_filter_applied query={query_text!r}")
             else:
                 steps.append("keyword_filter_skipped query_empty=true")
-                query_mode = "recent"
+            steps.append(
+                f"pipeline_done pages={page_count} scanned={scanned_count} date_kept={date_filtered_count} "
+                f"keyword_kept={keyword_filtered_count} final={len(result_memos)}"
+            )
 
-            logger.info(f"[memos_search] trace={trace_id} ok fetched={len(memos)}")
+            logger.info(f"[memos_search] trace={trace_id} ok returned={len(result_memos)}")
             return {
                 "ok": True,
                 "trace_id": trace_id,
                 "result": {
                     "query_mode": query_mode,
                     "search_max_count": search_max_count,
-                    "matched_count": len(memos),
-                    "memos": memos,
+                    "matched_count": len(result_memos),
+                    "memos": result_memos,
                 },
                 "audit": self._build_audit(
                     trace_id,
                     steps,
                     metrics={
                         "query_mode": query_mode,
-                        "search_pool_limit": search_max_count,
-                        "matched_count": len(memos),
+                        "final_return_limit": search_max_count,
+                        "selected_date_field": selected_date_field,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "scanned_count": scanned_count,
+                        "date_filtered_count": date_filtered_count,
+                        "keyword_filtered_count": keyword_filtered_count,
+                        "matched_count": len(result_memos),
                     },
                 ),
                 "errors": [],
+            }
+        except ValueError as exc:
+            steps.append(f"error type=invalid_date message={exc}")
+            logger.error(f"[memos_search] trace={trace_id} invalid date: {exc}")
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
             }
         except MemosClientError as exc:
             steps.append(f"error type=memos_client_error message={exc}")
@@ -292,8 +422,8 @@ class BaseMemosTool(FunctionTool[AstrAgentContext]):
 class MemosSearchTool(BaseMemosTool):
     name = "memos_search"
     description = (
-        "Search memos from the recent memo pool only. Uses plugin search_max_count, "
-        "sorted by latest-first. If query is empty, returns recent memos directly."
+        "Search memos with optional date range and keyword. Pipeline is date filtering then "
+        "keyword matching. Final returned items are capped by plugin search_max_count."
     )
     parameters = {
         "type": "object",
@@ -301,6 +431,19 @@ class MemosSearchTool(BaseMemosTool):
             "query": {
                 "type": "string",
                 "description": "Optional keyword query. Empty means return recent memos.",
+            },
+            "start_date": {
+                "type": "string",
+                "description": "Optional start date/time. Supports YYYY-MM-DD or ISO8601.",
+            },
+            "end_date": {
+                "type": "string",
+                "description": "Optional end date/time. Supports YYYY-MM-DD or ISO8601.",
+            },
+            "date_field": {
+                "type": "string",
+                "description": "Date field for filtering: display_time/create_time/update_time.",
+                "default": "display_time",
             },
             "include_archived": {
                 "type": "boolean",
@@ -318,7 +461,13 @@ class MemosSearchTool(BaseMemosTool):
     ) -> ToolExecResult:
         query = kwargs.get("query")
         include_archived = bool(kwargs.get("include_archived", False))
-        return await self.plugin.run_search(query=query, include_archived=include_archived)
+        return await self.plugin.run_search(
+            query=query,
+            include_archived=include_archived,
+            start_date=kwargs.get("start_date"),
+            end_date=kwargs.get("end_date"),
+            date_field=str(kwargs.get("date_field", "display_time")),
+        )
 
 
 class MemosCreateTool(BaseMemosTool):
