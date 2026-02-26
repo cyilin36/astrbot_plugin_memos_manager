@@ -112,7 +112,7 @@ class MemosClient:
         if page_token:
             params["pageToken"] = page_token
         if old_filter:
-            params["old_filter"] = old_filter
+            params["oldFilter"] = old_filter
         data = await self._request("GET", "/memos", params=params)
         memos = data.get("memos", [])
         if not isinstance(memos, list):
@@ -131,10 +131,8 @@ class MemosClient:
 
     async def create_memo(self, content: str, visibility: str) -> dict[str, Any]:
         payload = {
-            "memo": {
-                "content": content,
-                "visibility": visibility,
-            }
+            "content": content,
+            "visibility": visibility,
         }
         data = await self._request("POST", "/memos", json_body=payload)
         return self._sanitize_memo(data)
