@@ -27,14 +27,24 @@ except ImportError:
 @register(
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
-    "Memos manager tools for search/create/update/delete.",
-    "0.1",
-    "",
+    "一个能对usememos/memos进行管理的插件",
+    "0.2",
+    "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
+    """Memos 管理插件主类。
+
+    说明：
+    1) 负责读取配置、注册 LLM tools。
+    2) 负责统一构建 Memos 客户端和审计日志。
+    3) 负责工具级 UID 白名单鉴权。
+    """
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+
+        # 注册给 Agent 可自动调用的工具。
         self.context.add_llm_tools(
             MemosSearchTool(self),
             MemosCreateTool(self),
@@ -42,11 +52,17 @@ class MemosManagerPlugin(Star):
             MemosDeleteTool(self),
         )
 
+    # ------------------------------
+    # 配置读取与基础工具方法
+    # ------------------------------
+
     def _cfg_str(self, key: str, default: str = "") -> str:
+        """读取字符串配置，若类型不合法则回落默认值。"""
         value = self.config.get(key, default)
         return value if isinstance(value, str) else default
 
     def _cfg_int(self, key: str, default: int) -> int:
+        """读取整数配置，并保证值为正数。"""
         value = self.config.get(key, default)
         try:
             parsed = int(value)
@@ -55,6 +71,7 @@ class MemosManagerPlugin(Star):
             return default
 
     def _cfg_bool(self, key: str, default: bool) -> bool:
+        """读取布尔配置，兼容字符串形式。"""
         value = self.config.get(key, default)
         if isinstance(value, bool):
             return value
@@ -63,12 +80,177 @@ class MemosManagerPlugin(Star):
         return default
 
     def _trace_id(self) -> str:
+        """生成短 trace id，方便日志链路追踪。"""
         return uuid.uuid4().hex[:10]
 
     def _local_tz(self):
+        """获取本地时区；若异常回退 UTC。"""
         return datetime.now().astimezone().tzinfo or timezone.utc
 
+    def _build_client(self) -> MemosClient:
+        """基于当前配置构建 Memos 客户端。"""
+        return MemosClient(
+            base_url=self._cfg_str("memos_base_url"),
+            token=self._cfg_str("memos_token"),
+            timeout_seconds=20,
+        )
+
+    def _build_audit(
+        self,
+        trace_id: str,
+        steps: list[str],
+        metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """构建可返回给 LLM 的审计摘要。
+
+        该摘要用于让 Agent 判断工具是否执行完成。
+        为避免上下文膨胀，按配置限制字符长度。
+        """
+        if not self._cfg_bool("enable_ai_audit_log", True):
+            return None
+        max_chars = self._cfg_int("ai_audit_log_max_chars", 2000)
+        joined = "\n".join(steps)
+        if len(joined) > max_chars:
+            joined = joined[:max_chars] + "..."
+        payload: dict[str, Any] = {
+            "trace_id": trace_id,
+            "steps": joined,
+        }
+        if metrics:
+            payload["metrics"] = metrics
+        return payload
+
+    # ------------------------------
+    # UID 白名单鉴权
+    # ------------------------------
+
+    def _parse_allowed_uids(self) -> set[str]:
+        """解析白名单 UID。
+
+        配置格式：逗号分隔字符串，仅保留纯数字 UID。
+        非纯数字项会被忽略。
+        """
+        raw = self._cfg_str("allowed_uids", "")
+        parts = [x.strip() for x in raw.split(",") if x.strip()]
+        return {x for x in parts if x.isdigit()}
+
+    @staticmethod
+    def _extract_uid_from_event(event: Any) -> str | None:
+        """从事件对象提取用户 UID。
+
+        优先从 message_obj.sender.user_id 获取；
+        再尝试 event.get_sender_id()。
+        """
+        msg_obj = getattr(event, "message_obj", None)
+        if msg_obj is not None:
+            sender = getattr(msg_obj, "sender", None)
+            # sender 可能是对象，也可能是 dict。
+            if sender is not None:
+                sender_uid = getattr(sender, "user_id", None)
+                if sender_uid is None and isinstance(sender, dict):
+                    sender_uid = sender.get("user_id")
+                if sender_uid is not None:
+                    return str(sender_uid)
+
+        get_sender_id = getattr(event, "get_sender_id", None)
+        if callable(get_sender_id):
+            try:
+                sender_uid = get_sender_id()
+                if sender_uid is not None:
+                    return str(sender_uid)
+            except Exception:
+                return None
+        return None
+
+    def _extract_uid_from_ctx(self, context: ContextWrapper[AstrAgentContext]) -> str | None:
+        """从 tool 上下文提取 UID。
+
+        依据 AstrBot 官方文档与插件实践，优先使用 context.context.event。
+        该路径在 tool 调用阶段通常最稳定。
+        """
+        inner_ctx = getattr(context, "context", None)
+        event = getattr(inner_ctx, "event", None)
+        if event is not None:
+            uid = self._extract_uid_from_event(event)
+            if uid:
+                return uid
+
+        event = getattr(context, "event", None)
+        if event is not None:
+            uid = self._extract_uid_from_event(event)
+            if uid:
+                return uid
+
+        run_ctx = getattr(context, "run_context", None)
+        if run_ctx is not None:
+            event = getattr(run_ctx, "event", None)
+            if event is not None:
+                uid = self._extract_uid_from_event(event)
+                if uid:
+                    return uid
+        return None
+
+    def _check_tool_permission(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        tool_name: str,
+    ) -> tuple[bool, str, str | None]:
+        """统一进行工具调用权限校验。
+
+        返回：
+        - bool: 是否允许
+        - str: 失败原因（仅内部描述）
+        - str|None: 当前 UID
+        """
+        if not self._cfg_bool("enable_uid_auth", False):
+            return True, "uid_auth_disabled", None
+
+        uid = self._extract_uid_from_ctx(context)
+        if not uid:
+            return False, f"uid_missing_for_tool_{tool_name}", None
+
+        allowed_uids = self._parse_allowed_uids()
+        if not allowed_uids:
+            return False, "allowed_uids_empty", uid
+
+        if uid not in allowed_uids:
+            return False, f"uid_not_allowed_for_tool_{tool_name}", uid
+
+        return True, "uid_allowed", uid
+
+    def _auth_denied_result(
+        self,
+        trace_id: str,
+        tool_name: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """生成统一的鉴权失败返回。
+
+        注意：该返回不泄露 UID 等敏感字段。
+        """
+        steps = [
+            f"auth_denied tool={tool_name}",
+            f"reason={reason}",
+        ]
+        return {
+            "ok": False,
+            "trace_id": trace_id,
+            "result": {},
+            "audit": self._build_audit(trace_id, steps),
+            "errors": ["当前用户无权限使用该工具"],
+        }
+
+    # ------------------------------
+    # 搜索相关方法
+    # ------------------------------
+
     def _parse_date_bound(self, raw: str | None, *, is_end: bool) -> datetime | None:
+        """解析日期上下界。
+
+        支持：
+        - YYYY-MM-DD
+        - ISO8601
+        """
         if raw is None:
             return None
         text = raw.strip()
@@ -91,6 +273,7 @@ class MemosManagerPlugin(Star):
             raise ValueError(f"invalid date format: {raw}") from exc
 
     def _parse_memo_time(self, raw: Any) -> datetime | None:
+        """解析 memo 返回的时间字段为 UTC datetime。"""
         if not isinstance(raw, str) or not raw:
             return None
         try:
@@ -100,6 +283,7 @@ class MemosManagerPlugin(Star):
 
     @staticmethod
     def _memo_match_keyword(memo: dict[str, Any], query: str) -> bool:
+        """在 content/snippet/tags 上做大小写无关匹配。"""
         q_cf = query.casefold()
         content = str(memo.get("content", ""))
         snippet = str(memo.get("snippet", ""))
@@ -107,33 +291,6 @@ class MemosManagerPlugin(Star):
         tags_text = " ".join(tags) if isinstance(tags, list) else ""
         haystack = f"{content}\n{snippet}\n{tags_text}".casefold()
         return q_cf in haystack
-
-    def _build_client(self) -> MemosClient:
-        return MemosClient(
-            base_url=self._cfg_str("memos_base_url"),
-            token=self._cfg_str("memos_token"),
-            timeout_seconds=20,
-        )
-
-    def _build_audit(
-        self,
-        trace_id: str,
-        steps: list[str],
-        metrics: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        if not self._cfg_bool("enable_ai_audit_log", True):
-            return None
-        max_chars = self._cfg_int("ai_audit_log_max_chars", 2000)
-        joined = "\n".join(steps)
-        if len(joined) > max_chars:
-            joined = joined[:max_chars] + "..."
-        payload: dict[str, Any] = {
-            "trace_id": trace_id,
-            "steps": joined,
-        }
-        if metrics:
-            payload["metrics"] = metrics
-        return payload
 
     async def run_search(
         self,
@@ -143,6 +300,13 @@ class MemosManagerPlugin(Star):
         end_date: str | None = None,
         date_field: str = "display_time",
     ) -> dict[str, Any]:
+        """执行 memos 搜索。
+
+        流程：
+        1) 日期过滤
+        2) 关键词过滤
+        3) 截断到 search_max_count
+        """
         trace_id = self._trace_id()
         steps: list[str] = []
         search_max_count = self._cfg_int("search_max_count", 50)
@@ -168,6 +332,7 @@ class MemosManagerPlugin(Star):
 
             client = self._build_client()
 
+            # v0.24 的 display_time 区间在 oldFilter 中可直接走服务端过滤。
             old_filter_parts: list[str] = []
             if selected_date_field == "display_time":
                 if start_dt is not None:
@@ -201,6 +366,7 @@ class MemosManagerPlugin(Star):
 
                 date_kept: list[dict[str, Any]] = []
                 for memo in memos_page:
+                    # 当不是 display_time 时，日期过滤由插件侧补上。
                     if selected_date_field != "display_time":
                         target_dt = self._parse_memo_time(memo.get(selected_date_field))
                         if target_dt is None:
@@ -299,6 +465,7 @@ class MemosManagerPlugin(Star):
             }
 
     async def run_create(self, content: str, visibility: str | None = None) -> dict[str, Any]:
+        """创建 memo，未指定可见性时使用默认配置。"""
         trace_id = self._trace_id()
         steps: list[str] = []
         try:
@@ -340,6 +507,7 @@ class MemosManagerPlugin(Star):
         visibility: str | None = None,
         pinned: bool | None = None,
     ) -> dict[str, Any]:
+        """更新 memo 的内容、可见性和置顶状态。"""
         trace_id = self._trace_id()
         steps: list[str] = []
         try:
@@ -388,6 +556,7 @@ class MemosManagerPlugin(Star):
             }
 
     async def run_delete(self, name: str) -> dict[str, Any]:
+        """删除 memo。"""
         trace_id = self._trace_id()
         steps: list[str] = [f"start memos_delete trace={trace_id} name={name}"]
         try:
@@ -415,39 +584,54 @@ class MemosManagerPlugin(Star):
 
 
 class BaseMemosTool(FunctionTool[AstrAgentContext]):
+    """所有 Memos Tool 的基类，提供统一鉴权入口。"""
+
     def __init__(self, plugin: MemosManagerPlugin):
         self.plugin = plugin
+
+    def _check_auth_or_return(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        tool_name: str,
+    ) -> dict[str, Any] | None:
+        """在每个工具调用前执行权限校验。
+
+        若校验失败，直接返回错误结果。
+        """
+        trace_id = self.plugin._trace_id()
+        allowed, reason, _uid = self.plugin._check_tool_permission(context, tool_name)
+        if allowed:
+            return None
+        logger.warning("[memos_auth] tool=%s denied reason=%s", tool_name, reason)
+        return self.plugin._auth_denied_result(trace_id=trace_id, tool_name=tool_name, reason=reason)
 
 
 class MemosSearchTool(BaseMemosTool):
     name = "memos_search"
-    description = (
-        "Search memos with optional date range and keyword. Pipeline is date filtering then "
-        "keyword matching. Final returned items are capped by plugin search_max_count."
-    )
+    description = "按日期和关键词检索笔记，返回条数受配置限制。"
     parameters = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Optional keyword query. Empty means return recent memos.",
+                "description": "关键词，可选。为空时返回日期筛选后的结果。",
             },
             "start_date": {
                 "type": "string",
-                "description": "Optional start date/time. Supports YYYY-MM-DD or ISO8601.",
+                "description": "起始日期/时间，支持 YYYY-MM-DD 或 ISO8601。",
             },
             "end_date": {
                 "type": "string",
-                "description": "Optional end date/time. Supports YYYY-MM-DD or ISO8601.",
+                "description": "结束日期/时间，支持 YYYY-MM-DD 或 ISO8601。",
             },
             "date_field": {
                 "type": "string",
-                "description": "Date field for filtering: display_time/create_time/update_time.",
+                "description": "日期字段：display_time/create_time/update_time。",
                 "default": "display_time",
             },
             "include_archived": {
                 "type": "boolean",
-                "description": "Whether to include archived memos.",
+                "description": "是否包含归档笔记。",
                 "default": False,
             },
         },
@@ -459,6 +643,10 @@ class MemosSearchTool(BaseMemosTool):
         context: ContextWrapper[AstrAgentContext],
         **kwargs: Any,
     ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
         query = kwargs.get("query")
         include_archived = bool(kwargs.get("include_archived", False))
         return await self.plugin.run_search(
@@ -472,17 +660,17 @@ class MemosSearchTool(BaseMemosTool):
 
 class MemosCreateTool(BaseMemosTool):
     name = "memos_create"
-    description = "Create a new memo. Visibility defaults to plugin default_visibility."
+    description = "创建一条新笔记。"
     parameters = {
         "type": "object",
         "properties": {
             "content": {
                 "type": "string",
-                "description": "Memo content in markdown.",
+                "description": "笔记正文（Markdown 文本）。",
             },
             "visibility": {
                 "type": "string",
-                "description": "Optional visibility label: workspace/private/public.",
+                "description": "可选可见性：workspace/private/public。",
             },
         },
         "required": ["content"],
@@ -493,6 +681,10 @@ class MemosCreateTool(BaseMemosTool):
         context: ContextWrapper[AstrAgentContext],
         **kwargs: Any,
     ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
         return await self.plugin.run_create(
             content=str(kwargs["content"]),
             visibility=kwargs.get("visibility"),
@@ -501,25 +693,25 @@ class MemosCreateTool(BaseMemosTool):
 
 class MemosUpdateTool(BaseMemosTool):
     name = "memos_update"
-    description = "Update memo content/visibility/pinned by memo name."
+    description = "更新笔记内容、可见性或置顶状态。"
     parameters = {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "description": "Memo resource name, e.g. memos/xxxx.",
+                "description": "笔记资源名，例如 memos/xxxx。",
             },
             "content": {
                 "type": "string",
-                "description": "Optional updated markdown content.",
+                "description": "可选：更新后的正文。",
             },
             "visibility": {
                 "type": "string",
-                "description": "Optional visibility label: workspace/private/public.",
+                "description": "可选可见性：workspace/private/public。",
             },
             "pinned": {
                 "type": "boolean",
-                "description": "Optional pinned flag.",
+                "description": "可选：是否置顶。",
             },
         },
         "required": ["name"],
@@ -530,6 +722,10 @@ class MemosUpdateTool(BaseMemosTool):
         context: ContextWrapper[AstrAgentContext],
         **kwargs: Any,
     ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
         return await self.plugin.run_update(
             name=str(kwargs["name"]),
             content=kwargs.get("content"),
@@ -540,13 +736,13 @@ class MemosUpdateTool(BaseMemosTool):
 
 class MemosDeleteTool(BaseMemosTool):
     name = "memos_delete"
-    description = "Delete a memo by resource name."
+    description = "按资源名删除一条笔记。"
     parameters = {
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
-                "description": "Memo resource name, e.g. memos/xxxx.",
+                "description": "笔记资源名，例如 memos/xxxx。",
             },
         },
         "required": ["name"],
@@ -557,4 +753,8 @@ class MemosDeleteTool(BaseMemosTool):
         context: ContextWrapper[AstrAgentContext],
         **kwargs: Any,
     ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
         return await self.plugin.run_delete(name=str(kwargs["name"]))

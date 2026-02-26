@@ -1,43 +1,54 @@
 {
   "memos_base_url": {
     "type": "string",
-    "description": "Memos site URL, e.g. https://memos.example.com",
-    "hint": "Do not include API token in URL. /api/v1 is auto-appended if missing.",
+    "description": "Memos 服务地址（例如：https://memos.example.com）",
+    "hint": "不要在地址里填写 token。若未带 /api/v1，插件会自动补全。",
     "default": ""
   },
   "memos_token": {
     "type": "string",
-    "description": "Memos access token (Bearer token)",
-    "hint": "Create token in your Memos account settings.",
+    "description": "Memos 访问令牌（Bearer Token）",
+    "hint": "请在 Memos 账户设置中创建 token。",
     "obvious_hint": true,
     "default": ""
   },
   "default_visibility": {
     "type": "string",
-    "description": "Default memo visibility",
+    "description": "默认笔记可见性",
     "options": ["workspace", "private", "public"],
     "default": "workspace"
   },
   "search_max_count": {
     "type": "int",
-    "description": "memos_search max recent memo pool size",
-    "hint": "Each search only considers the latest N memos in descending time order.",
+    "description": "memos_search 最多返回条数",
+    "hint": "日期与关键词筛选完成后，最终最多返回该数量的笔记。",
     "default": 50
   },
   "enable_ai_audit_log": {
     "type": "bool",
-    "description": "Return compact execution audit logs in tool output",
+    "description": "是否在工具输出中返回精简审计日志",
     "default": true
   },
   "ai_audit_log_max_chars": {
     "type": "int",
-    "description": "Maximum characters for returned audit log text",
+    "description": "审计日志最大返回字符数",
     "default": 2000
   },
   "log_level": {
     "type": "string",
-    "description": "Plugin log verbosity",
+    "description": "插件日志级别",
     "options": ["DEBUG", "INFO", "ERROR"],
     "default": "INFO"
+  },
+  "enable_uid_auth": {
+    "type": "bool",
+    "description": "是否启用 UID 白名单鉴权（对所有 tools 生效）",
+    "default": false
+  },
+  "allowed_uids": {
+    "type": "string",
+    "description": "允许使用插件的 UID 列表（逗号分隔，仅支持纯数字）",
+    "hint": "先使用命令 /sid 获取 UID，再将多个 UID 以逗号分隔填写。",
+    "default": ""
   }
 }
