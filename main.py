@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.3",
+    "0.4",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -45,12 +45,14 @@ class MemosManagerPlugin(Star):
         self.config = config
 
         # 注册给 Agent 可自动调用的工具。
-        self.context.add_llm_tools(
+        tools = [
             MemosSearchTool(self),
             MemosCreateTool(self),
             MemosUpdateTool(self),
-            MemosDeleteTool(self),
-        )
+        ]
+        if self._cfg_bool("enable_memos_delete_tool", False):
+            tools.append(MemosDeleteTool(self))
+        self.context.add_llm_tools(*tools)
 
     # ------------------------------
     # 配置读取与基础工具方法

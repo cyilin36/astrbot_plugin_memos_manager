@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4 - 2026-02-27
+
+- 新增配置项 `enable_memos_delete_tool`，默认关闭删除工具。
+- 仅在 WebUI 打开 `enable_memos_delete_tool` 后注册 `memos_delete`。
+
 ## v0.3 - 2026-02-27
 
 - 修复 `memos_update` 的 PATCH 请求体结构：移除外层 `memo` 包装。

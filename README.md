@@ -2,7 +2,7 @@
 
 `astrbot_plugin_memos_manager` 是一个面向 AstrBot 的插件，用于管理 `usememos/memos v0.24`。
 
-- 当前版本：`0.3`
+- 当前版本：`0.4`
 - 仓库地址：`https://github.com/cyilin36/astrbot_plugin_memos_manager`
 
 ## 插件能力
@@ -12,7 +12,7 @@
 - `memos_search`：按日期与关键词检索笔记
 - `memos_create`：创建笔记
 - `memos_update`：更新笔记内容/可见性/置顶
-- `memos_delete`：删除笔记
+- `memos_delete`：删除笔记（默认关闭，需在 WebUI 启用）
 
 ## 功能实现方式
 
@@ -49,6 +49,7 @@
 - `log_level`：插件日志级别
 - `enable_uid_auth`：是否启用 UID 白名单鉴权
 - `allowed_uids`：允许使用插件的 UID 列表（逗号分隔，仅纯数字）
+- `enable_memos_delete_tool`：是否启用 `memos_delete` 工具（默认关闭）
 
 `allowed_uids` 的填写方式：
 

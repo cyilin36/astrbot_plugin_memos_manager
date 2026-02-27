@@ -50,5 +50,10 @@
     "description": "允许使用插件的 UID 列表（逗号分隔，仅支持纯数字）",
     "hint": "先使用命令 /sid 获取 UID，再将多个 UID 以逗号分隔填写。",
     "default": ""
+  },
+  "enable_memos_delete_tool": {
+    "type": "bool",
+    "description": "是否启用 memos_delete 工具（默认关闭）",
+    "default": false
   }
 }
