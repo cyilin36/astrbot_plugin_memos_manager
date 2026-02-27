@@ -1,9 +1,16 @@
 # Changelog
 
+## v0.6 - 2026-02-27
+
+- 新增 `memos_archive` 的 `action=list_archived` 模式，可读取已归档笔记列表。
+- 支持先查询已归档笔记，再通过 `action=set` + `archived=false` 执行取消归档。
+- 同步更新用户文档与版本号至 `0.6`。
+
 ## v0.5 - 2026-02-27
 
 - 新增 `memos_archive` 工具，支持将笔记归档或取消归档。
 - `memos_archive` 参数 `archived` 默认值为 `true`，可通过 `false` 恢复为未归档。
+- `memos_archive` 新增 `action=list_archived`，可直接查询已归档笔记列表以便后续反归档。
 
 ## v0.4 - 2026-02-27
 

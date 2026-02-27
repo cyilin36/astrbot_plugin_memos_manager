@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.5",
+    "0.6",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -620,6 +620,42 @@ class MemosManagerPlugin(Star):
                 "errors": [str(exc)],
             }
 
+    async def run_archive_list(
+        self,
+        query: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        date_field: str = "display_time",
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """查询已归档 memo 列表。"""
+        search_result = await self.run_search(
+            query=query,
+            include_archived=True,
+            start_date=start_date,
+            end_date=end_date,
+            date_field=date_field,
+        )
+        if not search_result.get("ok"):
+            return search_result
+
+        search_max_count = self._cfg_int("search_max_count", 50)
+        requested_limit = limit if isinstance(limit, int) and limit > 0 else 20
+        effective_limit = min(requested_limit, search_max_count)
+
+        result = search_result.get("result") or {}
+        memos_any = result.get("memos")
+        memos: list[dict[str, Any]] = memos_any if isinstance(memos_any, list) else []
+        trimmed = memos[:effective_limit]
+
+        result["query_mode"] = "archived_list"
+        result["requested_limit"] = requested_limit
+        result["effective_limit"] = effective_limit
+        result["matched_count"] = len(trimmed)
+        result["memos"] = trimmed
+        search_result["result"] = result
+        return search_result
+
 
 class BaseMemosTool(FunctionTool[AstrAgentContext]):
     """所有 Memos Tool 的基类，提供统一鉴权入口。"""
@@ -800,21 +836,47 @@ class MemosDeleteTool(BaseMemosTool):
 
 class MemosArchiveTool(BaseMemosTool):
     name = "memos_archive"
-    description = "归档或取消归档一条笔记。"
+    description = "归档管理：设置归档状态或查询已归档笔记。"
     parameters = {
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "description": "操作类型：set 或 list_archived。",
+                "default": "set",
+            },
             "name": {
                 "type": "string",
-                "description": "笔记资源名，例如 memos/xxxx。",
+                "description": "笔记资源名，例如 memos/xxxx。action=set 时必填。",
             },
             "archived": {
                 "type": "boolean",
-                "description": "是否归档。true=归档，false=取消归档。",
+                "description": "是否归档。true=归档，false=取消归档。action=set 时生效。",
                 "default": True,
             },
+            "query": {
+                "type": "string",
+                "description": "关键词。action=list_archived 时可选。",
+            },
+            "start_date": {
+                "type": "string",
+                "description": "起始日期/时间，支持 YYYY-MM-DD 或 ISO8601。action=list_archived 时可选。",
+            },
+            "end_date": {
+                "type": "string",
+                "description": "结束日期/时间，支持 YYYY-MM-DD 或 ISO8601。action=list_archived 时可选。",
+            },
+            "date_field": {
+                "type": "string",
+                "description": "日期字段：display_time/create_time/update_time。action=list_archived 时生效。",
+                "default": "display_time",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "返回数量上限。action=list_archived 时生效，默认 20。",
+            },
         },
-        "required": ["name"],
+        "required": [],
     }
 
     async def call(
@@ -826,7 +888,44 @@ class MemosArchiveTool(BaseMemosTool):
         if denied is not None:
             return denied
 
+        action = str(kwargs.get("action", "set")).strip().lower()
+        if action == "list_archived":
+            return await self.plugin.run_archive_list(
+                query=kwargs.get("query"),
+                start_date=kwargs.get("start_date"),
+                end_date=kwargs.get("end_date"),
+                date_field=str(kwargs.get("date_field", "display_time")),
+                limit=kwargs.get("limit"),
+            )
+
+        if action != "set":
+            trace_id = self.plugin._trace_id()
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self.plugin._build_audit(
+                    trace_id,
+                    [f"error invalid_action action={action}"],
+                ),
+                "errors": ["action must be one of: set, list_archived"],
+            }
+
+        name = str(kwargs.get("name", "")).strip()
+        if not name:
+            trace_id = self.plugin._trace_id()
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self.plugin._build_audit(
+                    trace_id,
+                    ["error missing_name_for_set_action"],
+                ),
+                "errors": ["name is required when action is set"],
+            }
+
         return await self.plugin.run_archive(
-            name=str(kwargs["name"]),
+            name=name,
             archived=bool(kwargs.get("archived", True)),
         )
