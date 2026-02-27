@@ -142,13 +142,13 @@ class MemosClient:
             raise MemosClientError("memo name must start with memos/")
         mask_paths = list(updates.keys())
         payload = {
-            "memo": {
-                "name": name,
-                **updates,
-            },
+            "name": name,
+            **updates,
+        }
+        params = {
             "updateMask": ",".join(mask_paths),
         }
-        data = await self._request("PATCH", f"/{name}", json_body=payload)
+        data = await self._request("PATCH", f"/{name}", params=params, json_body=payload)
         return self._sanitize_memo(data)
 
     async def delete_memo(self, name: str) -> None:

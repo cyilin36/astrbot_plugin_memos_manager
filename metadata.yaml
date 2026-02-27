@@ -1,6 +1,6 @@
 name: astrbot_plugin_memos_manager
 display_name: Memos Manager
 description: 一个能对usememos/memos进行管理的插件
-version: 0.2
+version: 0.3
 author: astrbot_plugin_memos_manager
 repo: "https://github.com/cyilin36/astrbot_plugin_memos_manager"
