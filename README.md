@@ -2,9 +2,6 @@
 
 `astrbot_plugin_memos_manager` 是一个面向 AstrBot 的插件，用于管理 `usememos/memos v0.24`。
 
-- 当前版本：`0.5`
-- 仓库地址：`https://github.com/cyilin36/astrbot_plugin_memos_manager`
-
 ## 插件能力
 
 本插件提供以下 LLM tools：
