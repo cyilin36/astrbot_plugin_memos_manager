@@ -20,8 +20,8 @@
   },
   "search_max_count": {
     "type": "int",
-    "description": "memos_search 最多返回条数",
-    "hint": "日期与关键词筛选完成后，最终最多返回该数量的笔记。",
+    "description": "搜索最多返回条数",
+    "hint": "memos_search 与 memos_archive（list_archived）最终最多返回该数量的笔记。",
     "default": 50
   },
   "enable_ai_audit_log": {

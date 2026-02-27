@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7 - 2026-02-27
+
+- `memos_search` 固定仅查询未归档笔记。
+- 已归档笔记查询统一由 `memos_archive`（`action=list_archived`）提供。
+- `memos_search` 与 `memos_archive` 查询返回条数统一受 `search_max_count` 控制。
+- WebUI 配置文案将 `search_max_count` 更新为“搜索最多返回条数”。
+
 ## v0.6 - 2026-02-27
 
 - 新增 `memos_archive` 的 `action=list_archived` 模式，可读取已归档笔记列表。

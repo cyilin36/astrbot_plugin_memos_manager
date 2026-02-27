@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.6",
+    "0.7",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -626,7 +626,6 @@ class MemosManagerPlugin(Star):
         start_date: str | None = None,
         end_date: str | None = None,
         date_field: str = "display_time",
-        limit: int | None = None,
     ) -> dict[str, Any]:
         """查询已归档 memo 列表。"""
         search_result = await self.run_search(
@@ -640,17 +639,14 @@ class MemosManagerPlugin(Star):
             return search_result
 
         search_max_count = self._cfg_int("search_max_count", 50)
-        requested_limit = limit if isinstance(limit, int) and limit > 0 else 20
-        effective_limit = min(requested_limit, search_max_count)
 
         result = search_result.get("result") or {}
         memos_any = result.get("memos")
         memos: list[dict[str, Any]] = memos_any if isinstance(memos_any, list) else []
-        trimmed = memos[:effective_limit]
+        trimmed = memos[:search_max_count]
 
         result["query_mode"] = "archived_list"
-        result["requested_limit"] = requested_limit
-        result["effective_limit"] = effective_limit
+        result["search_max_count"] = search_max_count
         result["matched_count"] = len(trimmed)
         result["memos"] = trimmed
         search_result["result"] = result
@@ -682,7 +678,7 @@ class BaseMemosTool(FunctionTool[AstrAgentContext]):
 
 class MemosSearchTool(BaseMemosTool):
     name = "memos_search"
-    description = "按日期和关键词检索笔记，返回条数受配置限制。"
+    description = "按日期和关键词检索未归档笔记，返回条数受配置限制。"
     parameters = {
         "type": "object",
         "properties": {
@@ -703,11 +699,6 @@ class MemosSearchTool(BaseMemosTool):
                 "description": "日期字段：display_time/create_time/update_time。",
                 "default": "display_time",
             },
-            "include_archived": {
-                "type": "boolean",
-                "description": "是否包含归档笔记。",
-                "default": False,
-            },
         },
         "required": [],
     }
@@ -722,10 +713,9 @@ class MemosSearchTool(BaseMemosTool):
             return denied
 
         query = kwargs.get("query")
-        include_archived = bool(kwargs.get("include_archived", False))
         return await self.plugin.run_search(
             query=query,
-            include_archived=include_archived,
+            include_archived=False,
             start_date=kwargs.get("start_date"),
             end_date=kwargs.get("end_date"),
             date_field=str(kwargs.get("date_field", "display_time")),
@@ -871,10 +861,6 @@ class MemosArchiveTool(BaseMemosTool):
                 "description": "日期字段：display_time/create_time/update_time。action=list_archived 时生效。",
                 "default": "display_time",
             },
-            "limit": {
-                "type": "integer",
-                "description": "返回数量上限。action=list_archived 时生效，默认 20。",
-            },
         },
         "required": [],
     }
@@ -895,7 +881,6 @@ class MemosArchiveTool(BaseMemosTool):
                 start_date=kwargs.get("start_date"),
                 end_date=kwargs.get("end_date"),
                 date_field=str(kwargs.get("date_field", "display_time")),
-                limit=kwargs.get("limit"),
             )
 
         if action != "set":

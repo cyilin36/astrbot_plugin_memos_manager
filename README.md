@@ -2,14 +2,14 @@
 
 `astrbot_plugin_memos_manager` 是一个面向 AstrBot 的插件，用于管理 `usememos/memos v0.24`。
 
-- 当前版本：`0.6`
+- 当前版本：`0.7`
 
 ## 插件能力
 
-- `memos_search`：按日期与关键词检索笔记
+- `memos_search`：按日期与关键词检索未归档笔记
 - `memos_create`：创建笔记
 - `memos_update`：更新笔记内容/可见性/置顶
-- `memos_archive`：归档管理（设置归档状态、查询已归档）
+- `memos_archive`：查询已归档 / 设置归档状态
 - `memos_delete`：删除笔记（默认关闭，需在 WebUI 启用）
 
 ## WebUI 配置
@@ -31,6 +31,10 @@
 - “帮我搜索这周包含 ‘发布’ 的 memo。”
 - “把这条 memo 置顶：memos/xxxx。”
 - “先列出已归档 memo，再把这条恢复成未归档：memos/xxxx。”
+
+- `memos_search` 仅查询未归档。
+- 已归档请用 `memos_archive` 查询。
+- 两者返回条数都受 `search_max_count` 控制。
 
 ## 注意事项
 
