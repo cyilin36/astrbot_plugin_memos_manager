@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5 - 2026-02-27
+
+- 新增 `memos_archive` 工具，支持将笔记归档或取消归档。
+- `memos_archive` 参数 `archived` 默认值为 `true`，可通过 `false` 恢复为未归档。
+
 ## v0.4 - 2026-02-27
 
 - 新增配置项 `enable_memos_delete_tool`，默认关闭删除工具。

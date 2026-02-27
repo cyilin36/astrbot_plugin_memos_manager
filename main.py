@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.4",
+    "0.5",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -49,6 +49,7 @@ class MemosManagerPlugin(Star):
             MemosSearchTool(self),
             MemosCreateTool(self),
             MemosUpdateTool(self),
+            MemosArchiveTool(self),
         ]
         if self._cfg_bool("enable_memos_delete_tool", False):
             tools.append(MemosDeleteTool(self))
@@ -584,6 +585,41 @@ class MemosManagerPlugin(Star):
                 "errors": [str(exc)],
             }
 
+    async def run_archive(self, name: str, archived: bool = True) -> dict[str, Any]:
+        """归档或取消归档 memo。"""
+        trace_id = self._trace_id()
+        target_state = "ARCHIVED" if archived else "NORMAL"
+        steps: list[str] = [
+            f"start memos_archive trace={trace_id} name={name} archived={archived} target_state={target_state}"
+        ]
+        try:
+            client = self._build_client()
+            memo = await client.update_memo(name=name, updates={"state": target_state})
+            steps.append("archive_done")
+            logger.info(
+                "[memos_archive] trace=%s ok memo=%s target_state=%s",
+                trace_id,
+                name,
+                target_state,
+            )
+            return {
+                "ok": True,
+                "trace_id": trace_id,
+                "result": {"memo": memo},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [],
+            }
+        except Exception as exc:
+            steps.append(f"error message={exc}")
+            logger.exception("[memos_archive] trace=%s failed", trace_id)
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+
 
 class BaseMemosTool(FunctionTool[AstrAgentContext]):
     """所有 Memos Tool 的基类，提供统一鉴权入口。"""
@@ -760,3 +796,37 @@ class MemosDeleteTool(BaseMemosTool):
             return denied
 
         return await self.plugin.run_delete(name=str(kwargs["name"]))
+
+
+class MemosArchiveTool(BaseMemosTool):
+    name = "memos_archive"
+    description = "归档或取消归档一条笔记。"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "笔记资源名，例如 memos/xxxx。",
+            },
+            "archived": {
+                "type": "boolean",
+                "description": "是否归档。true=归档，false=取消归档。",
+                "default": True,
+            },
+        },
+        "required": ["name"],
+    }
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        **kwargs: Any,
+    ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
+        return await self.plugin.run_archive(
+            name=str(kwargs["name"]),
+            archived=bool(kwargs.get("archived", True)),
+        )
