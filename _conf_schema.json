@@ -34,12 +34,6 @@
     "description": "审计日志最大返回字符数",
     "default": 2000
   },
-  "log_level": {
-    "type": "string",
-    "description": "插件日志级别",
-    "options": ["DEBUG", "INFO", "ERROR"],
-    "default": "INFO"
-  },
   "enable_uid_auth": {
     "type": "bool",
     "description": "是否启用 UID 白名单鉴权（对所有 tools 生效）",
@@ -47,8 +41,8 @@
   },
   "allowed_uids": {
     "type": "string",
-    "description": "允许使用插件的 UID 列表（逗号分隔，仅支持纯数字）",
-    "hint": "先使用命令 /sid 获取 UID，再将多个 UID 以逗号分隔填写。",
+    "description": "允许使用插件的 UID 列表（逗号分隔，支持任意 UID 字符串）",
+    "hint": "先使用命令 /sid 获取 UID，再将多个 UID 以逗号分隔填写（精确匹配，区分大小写）。",
     "default": ""
   },
   "enable_memos_delete_tool": {

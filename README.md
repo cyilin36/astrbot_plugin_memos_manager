@@ -2,7 +2,7 @@
 
 `astrbot_plugin_memos_manager` 是一个面向 AstrBot 的插件，用于管理 `usememos/memos v0.24`。
 
-- 当前版本：`0.7`
+- 当前版本：`0.9`
 
 ## 插件能力
 
@@ -17,13 +17,14 @@
 - `memos_base_url`：Memos 服务地址
 - `memos_token`：Memos 访问令牌
 - `enable_uid_auth`：是否启用 UID 白名单鉴权
-- `allowed_uids`：允许使用插件的 UID 列表（逗号分隔，仅纯数字）
+- `allowed_uids`：允许使用插件的 UID 列表（逗号分隔，支持任意字符串）
 - `enable_memos_delete_tool`：是否启用 `memos_delete`（默认关闭）
 
 `allowed_uids` 的填写方式：
 
 - 在聊天中先执行 `/sid` 获取 UID
 - 将多个 UID 用英文逗号分隔填写到 `allowed_uids`
+- 白名单按精确值匹配，区分大小写
 
 ## 使用示例
 

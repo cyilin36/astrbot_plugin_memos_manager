@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.7",
+    "0.9",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -130,12 +130,11 @@ class MemosManagerPlugin(Star):
     def _parse_allowed_uids(self) -> set[str]:
         """解析白名单 UID。
 
-        配置格式：逗号分隔字符串，仅保留纯数字 UID。
-        非纯数字项会被忽略。
+        配置格式：逗号分隔字符串，保留非空 UID。
         """
         raw = self._cfg_str("allowed_uids", "")
         parts = [x.strip() for x in raw.split(",") if x.strip()]
-        return {x for x in parts if x.isdigit()}
+        return set(parts)
 
     @staticmethod
     def _extract_uid_from_event(event: Any) -> str | None:
@@ -211,6 +210,7 @@ class MemosManagerPlugin(Star):
         uid = self._extract_uid_from_ctx(context)
         if not uid:
             return False, f"uid_missing_for_tool_{tool_name}", None
+        uid = str(uid)
 
         allowed_uids = self._parse_allowed_uids()
         if not allowed_uids:
@@ -242,6 +242,63 @@ class MemosManagerPlugin(Star):
             "audit": self._build_audit(trace_id, steps),
             "errors": ["当前用户无权限使用该工具"],
         }
+
+    def _tool_input_error(self, trace_id: str, code: str, message: str) -> dict[str, Any]:
+        """生成统一的输入参数错误返回。"""
+        steps = [
+            f"input_error code={code}",
+            f"message={message}",
+        ]
+        return {
+            "ok": False,
+            "trace_id": trace_id,
+            "result": {},
+            "audit": self._build_audit(trace_id, steps),
+            "errors": [message],
+        }
+
+    @staticmethod
+    def _parse_optional_text(raw: Any) -> str | None:
+        """解析可选文本参数，空白值归一为 None。"""
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    @staticmethod
+    def _parse_date_field(raw: Any, default: str = "display_time") -> str:
+        """解析日期字段，仅允许 display_time/create_time/update_time。"""
+        text = str(raw or default).strip().lower()
+        if text in {"display_time", "create_time", "update_time"}:
+            return text
+        return default
+
+    @staticmethod
+    def _parse_action(raw: Any, default: str = "set") -> str:
+        """解析 archive action，仅允许 set/list_archived。"""
+        text = str(raw or default).strip().lower()
+        if text in {"set", "list_archived"}:
+            return text
+        return text
+
+    @staticmethod
+    def _parse_bool_with_default(raw: Any, default: bool) -> bool:
+        """解析布尔参数，兼容字符串形式。"""
+        if raw is None:
+            return default
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(raw)
+
+    @staticmethod
+    def _require_name_for_set(raw: Any) -> tuple[bool, str]:
+        """校验并提取 name 参数。"""
+        name = str(raw or "").strip()
+        if not name:
+            return False, "name is required when action is set"
+        return True, name
 
     # ------------------------------
     # 搜索相关方法
@@ -313,9 +370,7 @@ class MemosManagerPlugin(Star):
         trace_id = self._trace_id()
         steps: list[str] = []
         search_max_count = self._cfg_int("search_max_count", 50)
-        selected_date_field = (date_field or "display_time").strip().lower()
-        if selected_date_field not in {"display_time", "create_time", "update_time"}:
-            selected_date_field = "display_time"
+        selected_date_field = self._parse_date_field(date_field)
         steps.append(
             f"start memos_search trace={trace_id} query_present={bool(query and query.strip())} "
             f"include_archived={include_archived} search_max_count={search_max_count} "
@@ -712,13 +767,14 @@ class MemosSearchTool(BaseMemosTool):
         if denied is not None:
             return denied
 
-        query = kwargs.get("query")
+        query = self.plugin._parse_optional_text(kwargs.get("query"))
+        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "display_time"))
         return await self.plugin.run_search(
             query=query,
             include_archived=False,
             start_date=kwargs.get("start_date"),
             end_date=kwargs.get("end_date"),
-            date_field=str(kwargs.get("date_field", "display_time")),
+            date_field=selected_date_field,
         )
 
 
@@ -865,6 +921,31 @@ class MemosArchiveTool(BaseMemosTool):
         "required": [],
     }
 
+    async def _handle_archive_list(self, kwargs: dict[str, Any]) -> ToolExecResult:
+        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "display_time"))
+        return await self.plugin.run_archive_list(
+            query=self.plugin._parse_optional_text(kwargs.get("query")),
+            start_date=kwargs.get("start_date"),
+            end_date=kwargs.get("end_date"),
+            date_field=selected_date_field,
+        )
+
+    async def _handle_archive_set(self, kwargs: dict[str, Any]) -> ToolExecResult:
+        ok, name_or_error = self.plugin._require_name_for_set(kwargs.get("name"))
+        if not ok:
+            trace_id = self.plugin._trace_id()
+            return self.plugin._tool_input_error(
+                trace_id=trace_id,
+                code="missing_name_for_set_action",
+                message=name_or_error,
+            )
+
+        archived = self.plugin._parse_bool_with_default(kwargs.get("archived"), True)
+        return await self.plugin.run_archive(
+            name=name_or_error,
+            archived=archived,
+        )
+
     async def call(
         self,
         context: ContextWrapper[AstrAgentContext],
@@ -874,43 +955,18 @@ class MemosArchiveTool(BaseMemosTool):
         if denied is not None:
             return denied
 
-        action = str(kwargs.get("action", "set")).strip().lower()
+        action = self.plugin._parse_action(kwargs.get("action", "set"))
         if action == "list_archived":
-            return await self.plugin.run_archive_list(
-                query=kwargs.get("query"),
-                start_date=kwargs.get("start_date"),
-                end_date=kwargs.get("end_date"),
-                date_field=str(kwargs.get("date_field", "display_time")),
-            )
+            return await self._handle_archive_list(kwargs)
 
         if action != "set":
             trace_id = self.plugin._trace_id()
-            return {
-                "ok": False,
-                "trace_id": trace_id,
-                "result": {},
-                "audit": self.plugin._build_audit(
-                    trace_id,
-                    [f"error invalid_action action={action}"],
-                ),
-                "errors": ["action must be one of: set, list_archived"],
-            }
+            return self.plugin._tool_input_error(
+                trace_id=trace_id,
+                code="invalid_action",
+                message="action must be one of: set, list_archived",
+            )
 
-        name = str(kwargs.get("name", "")).strip()
-        if not name:
-            trace_id = self.plugin._trace_id()
-            return {
-                "ok": False,
-                "trace_id": trace_id,
-                "result": {},
-                "audit": self.plugin._build_audit(
-                    trace_id,
-                    ["error missing_name_for_set_action"],
-                ),
-                "errors": ["name is required when action is set"],
-            }
-
-        return await self.plugin.run_archive(
-            name=name,
-            archived=bool(kwargs.get("archived", True)),
+        return await self._handle_archive_set(
+            kwargs=kwargs,
         )
