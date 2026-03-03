@@ -2,8 +2,6 @@
 
 `astrbot_plugin_memos_manager` 是一个面向 AstrBot 的插件，用于管理 `usememos/memos v0.24`。
 
-- 当前版本：`0.9`
-
 ## 插件能力
 
 - `memos_search`：按日期与关键词检索未归档笔记

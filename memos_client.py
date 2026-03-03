@@ -6,7 +6,35 @@ import httpx
 
 
 class MemosClientError(Exception):
-    pass
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        status_code: int | None = None,
+        method: str | None = None,
+        path: str | None = None,
+        raw_message: str | None = None,
+    ):
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.status_code = status_code
+        self.method = method
+        self.path = path
+        self.raw_message = raw_message
+
+    @property
+    def debug_message(self) -> str:
+        parts: list[str] = [self.user_message]
+        if self.status_code is not None:
+            parts.append(f"status={self.status_code}")
+        if self.method and self.path:
+            parts.append(f"request={self.method} {self.path}")
+        if self.raw_message:
+            parts.append(f"raw={self.raw_message}")
+        return " | ".join(parts)
+
+    def __str__(self) -> str:
+        return self.user_message
 
 
 class MemosClient:
@@ -49,6 +77,22 @@ class MemosClient:
             "state": memo.get("state", ""),
         }
 
+    @staticmethod
+    def _user_message_by_status(status_code: int) -> str:
+        if status_code == 401:
+            return "认证失败：请检查 memos_token 是否正确"
+        if status_code == 403:
+            return "权限不足：当前 token 无权执行该操作"
+        if status_code == 404:
+            return "资源不存在：请确认 memo name 是否正确"
+        if status_code == 429:
+            return "请求过于频繁：请稍后重试"
+        if 500 <= status_code <= 599:
+            return "Memos 服务异常：请稍后重试"
+        if 400 <= status_code <= 499:
+            return "请求参数不合法：请检查输入"
+        return "请求 Memos 失败：请稍后重试"
+
     async def _request(
         self,
         method: str,
@@ -68,9 +112,19 @@ class MemosClient:
                     headers=self._headers(),
                 )
         except httpx.TimeoutException as exc:
-            raise MemosClientError(f"request timeout: {method} {path}") from exc
+            raise MemosClientError(
+                "请求 Memos 超时：请稍后重试",
+                method=method,
+                path=path,
+                raw_message=str(exc),
+            ) from exc
         except httpx.HTTPError as exc:
-            raise MemosClientError(f"network error: {method} {path}: {exc}") from exc
+            raise MemosClientError(
+                "连接 Memos 失败：请检查网络或服务地址",
+                method=method,
+                path=path,
+                raw_message=str(exc),
+            ) from exc
 
         if response.status_code >= 400:
             message = response.text
@@ -81,7 +135,11 @@ class MemosClient:
             except Exception:
                 pass
             raise MemosClientError(
-                f"memos api error {response.status_code} on {method} {path}: {message}"
+                self._user_message_by_status(response.status_code),
+                status_code=response.status_code,
+                method=method,
+                path=path,
+                raw_message=message,
             )
 
         if not response.content:
@@ -90,9 +148,18 @@ class MemosClient:
             data = response.json()
             if isinstance(data, dict):
                 return data
-            raise MemosClientError(f"unexpected response shape on {method} {path}")
+            raise MemosClientError(
+                "Memos 返回格式异常：请稍后重试",
+                method=method,
+                path=path,
+            )
         except ValueError as exc:
-            raise MemosClientError(f"invalid json response on {method} {path}") from exc
+            raise MemosClientError(
+                "Memos 返回数据无法解析：请稍后重试",
+                method=method,
+                path=path,
+                raw_message=str(exc),
+            ) from exc
 
     async def list_memos_page(
         self,
@@ -139,7 +206,7 @@ class MemosClient:
 
     async def update_memo(self, name: str, updates: dict[str, Any]) -> dict[str, Any]:
         if not name.startswith("memos/"):
-            raise MemosClientError("memo name must start with memos/")
+            raise MemosClientError("memo name 格式错误：必须以 memos/ 开头")
         mask_paths = list(updates.keys())
         payload = {
             "name": name,
@@ -153,5 +220,5 @@ class MemosClient:
 
     async def delete_memo(self, name: str) -> None:
         if not name.startswith("memos/"):
-            raise MemosClientError("memo name must start with memos/")
+            raise MemosClientError("memo name 格式错误：必须以 memos/ 开头")
         await self._request("DELETE", f"/{name}")

@@ -28,7 +28,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "0.9",
+    "1.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -503,7 +503,11 @@ class MemosManagerPlugin(Star):
             }
         except MemosClientError as exc:
             steps.append(f"error type=memos_client_error message={exc}")
-            logger.error(f"[memos_search] trace={trace_id} failed: {exc}")
+            logger.error(
+                "[memos_search] trace=%s failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
             return {
                 "ok": False,
                 "trace_id": trace_id,
@@ -546,6 +550,20 @@ class MemosManagerPlugin(Star):
                 "result": {"memo": memo},
                 "audit": self._build_audit(trace_id, steps),
                 "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_create] trace=%s failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
             }
         except Exception as exc:
             steps.append(f"error message={exc}")
@@ -602,6 +620,20 @@ class MemosManagerPlugin(Star):
                 "audit": self._build_audit(trace_id, steps),
                 "errors": [],
             }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_update] trace=%s failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
         except Exception as exc:
             steps.append(f"error message={exc}")
             logger.exception("[memos_update] trace=%s failed", trace_id)
@@ -628,6 +660,20 @@ class MemosManagerPlugin(Star):
                 "result": {"deleted": name},
                 "audit": self._build_audit(trace_id, steps),
                 "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_delete] trace=%s failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
             }
         except Exception as exc:
             steps.append(f"error message={exc}")
@@ -663,6 +709,20 @@ class MemosManagerPlugin(Star):
                 "result": {"memo": memo},
                 "audit": self._build_audit(trace_id, steps),
                 "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_archive] trace=%s failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
             }
         except Exception as exc:
             steps.append(f"error message={exc}")
