@@ -4,7 +4,7 @@
 
 ## 插件能力
 
-- `memos_search`：按日期与关键词检索未归档笔记
+- `memos_search`：按日期与关键词检索当前用户的未归档笔记（包括 PRIVATE）
 - `memos_create`：创建笔记
 - `memos_update`：更新笔记内容/可见性/置顶
 - `memos_archive`：查询已归档 / 设置归档状态
@@ -34,6 +34,7 @@
 - `memos_search` 仅查询未归档。
 - 已归档请用 `memos_archive` 查询。
 - 两者返回条数都受 `search_max_count` 控制。
+- 查询使用当前 token 对应的用户作用域，可返回该用户的 PRIVATE、PROTECTED 和 PUBLIC 笔记。
 
 ## 注意事项
 

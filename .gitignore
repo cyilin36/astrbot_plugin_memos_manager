@@ -1,3 +1,5 @@
 AstrBot-docs/
 __pycache__/
 .gitignore
+tests/
+.DS_Store

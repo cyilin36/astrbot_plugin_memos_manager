@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from typing import Any
 
 import httpx
@@ -46,6 +49,7 @@ class MemosClient:
             raise MemosClientError("memos_base_url is empty")
         if not self.token:
             raise MemosClientError("memos_token is empty")
+        self.user_id = self._extract_user_id(self.token)
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:
@@ -55,6 +59,27 @@ class MemosClient:
         if cleaned.endswith("/api/v1"):
             return cleaned
         return f"{cleaned}/api/v1"
+
+    @staticmethod
+    def _extract_user_id(token: str) -> str:
+        """Read the numeric Memos user ID from the JWT subject claim.
+
+        The API still validates the token signature. This value is only used to
+        select the user-scoped list route required for PRIVATE memos.
+        """
+        try:
+            payload_part = token.split(".")[1]
+            padding = "=" * (-len(payload_part) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_part + padding))
+            if not isinstance(payload, dict):
+                raise ValueError("JWT payload must be an object")
+            subject = str(payload.get("sub", "")).strip()
+        except (binascii.Error, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MemosClientError("memos_token 格式错误：无法识别用户 ID") from exc
+
+        if not subject.isdigit():
+            raise MemosClientError("memos_token 格式错误：无法识别用户 ID")
+        return subject
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -180,7 +205,11 @@ class MemosClient:
             params["pageToken"] = page_token
         if old_filter:
             params["oldFilter"] = old_filter
-        data = await self._request("GET", "/memos", params=params)
+        data = await self._request(
+            "GET",
+            f"/users/{self.user_id}/memos",
+            params=params,
+        )
         memos = data.get("memos", [])
         if not isinstance(memos, list):
             raise MemosClientError("invalid memos list in list_memos_page")
