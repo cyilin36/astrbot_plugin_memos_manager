@@ -15,12 +15,14 @@ try:
     from .tool_models import (
         map_visibility_label_to_api,
         normalize_visibility_label,
+        readable_visibilities,
     )
 except ImportError:
     from memos_client import MemosClient, MemosClientError
     from tool_models import (
         map_visibility_label_to_api,
         normalize_visibility_label,
+        readable_visibilities,
     )
 
 
@@ -28,7 +30,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "1.1",
+    "1.2.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -363,14 +365,17 @@ class MemosManagerPlugin(Star):
         """执行 memos 搜索。
 
         流程：
-        1) 日期过滤
-        2) 关键词过滤
-        3) 截断到 search_max_count
+        1) 可见性过滤
+        2) 日期过滤
+        3) 关键词过滤
+        4) 截断到 search_max_count
         """
         trace_id = self._trace_id()
         steps: list[str] = []
         search_max_count = self._cfg_int("search_max_count", 50)
         selected_date_field = self._parse_date_field(date_field)
+        configured_visibility = self._cfg_str("default_visibility", "workspace")
+        allowed_visibilities = readable_visibilities(configured_visibility)
         steps.append(
             f"start memos_search trace={trace_id} query_present={bool(query and query.strip())} "
             f"include_archived={include_archived} search_max_count={search_max_count} "
@@ -422,8 +427,14 @@ class MemosManagerPlugin(Star):
                     break
                 scanned_count += len(memos_page)
 
+                visibility_kept = [
+                    memo
+                    for memo in memos_page
+                    if memo.get("visibility") in allowed_visibilities
+                ]
+
                 date_kept: list[dict[str, Any]] = []
-                for memo in memos_page:
+                for memo in visibility_kept:
                     # 当不是 display_time 时，日期过滤由插件侧补上。
                     if selected_date_field != "display_time":
                         target_dt = self._parse_memo_time(memo.get(selected_date_field))
