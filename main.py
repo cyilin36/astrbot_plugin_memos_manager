@@ -46,6 +46,11 @@ class MemosManagerPlugin(Star):
         super().__init__(context)
         self.config = config
 
+        # 一次性迁移旧版配置：v1.2.0 及更早的 allowed_uids 是逗号分隔字符串，
+        # 新版改用 AstrBot list 配置项。若存量配置仍是字符串，这里拆成真正的
+        # UID 列表并写回配置文件，避免 WebUI 列表编辑器把字符串逐字拆成条目。
+        self._migrate_allowed_uids_config()
+
         # 注册给 Agent 可自动调用的工具。
         tools = [
             MemosSearchTool(self),
@@ -129,25 +134,47 @@ class MemosManagerPlugin(Star):
     # UID 白名单鉴权
     # ------------------------------
 
-    def _parse_allowed_uids(self) -> set[str]:
-        """解析白名单 UID。
+    def _migrate_allowed_uids_config(self) -> None:
+        """将旧版字符串格式的 allowed_uids 迁移为 list 并持久化。
 
-        `allowed_uids` 使用 AstrBot 内置的 `list` 类型配置项，用户在
-        WebUI 中把每个 UID 作为单独一项逐条添加，无需再写逗号分隔。
-
-        兼容旧版：若升级前遗留的配置文件里仍是字符串（如
-        "uid1,uid2"），读取时会自动按逗号/换行拆分并归一。
+        仅当存量配置仍是字符串时执行一次；拆分只按旧版的英文逗号分隔符，
+        绝不对字符串逐字符拆分。迁移成功后写入配置文件，保证运行时与
+        WebUI 列表编辑器拿到的都是真正的数组。
         """
-        value = self.config.get("allowed_uids", [])
-        if isinstance(value, list):
-            raw_parts = value
-        elif isinstance(value, str) and value.strip():
-            # 旧版逗号分隔字符串兜底，保证平滑升级。
-            raw_parts = str(value).replace(",", "\n").split("\n")
-        else:
-            return set()
-        parts = [str(item).strip() for item in raw_parts if str(item).strip()]
-        return set(parts)
+        value = self.config.get("allowed_uids")
+        if not isinstance(value, str) or not value.strip():
+            return
+        uids = [part.strip() for part in value.split(",") if part.strip()]
+        if not uids:
+            return
+        self.config["allowed_uids"] = uids
+        try:
+            self.config.save_config()
+            logger.info(
+                "[memos_config] migrated allowed_uids to list, count=%d",
+                len(uids),
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "[memos_config] failed to persist allowed_uids migration: %s",
+                exc,
+            )
+
+    def _parse_allowed_uids(self) -> set[str]:
+        """读取白名单 UID。
+
+        `allowed_uids` 是 AstrBot 内置的 list 配置项，用户在 WebUI 中
+        逐条添加。此处采用与社区成熟插件一致的防御式读取：值若被误配成
+        字符串，仅视为单个 UID；其他异常类型按空处理；绝不逐字符拆分。
+        """
+        raw = self.config.get("allowed_uids") or []
+        if not isinstance(raw, (list, tuple, set)):
+            raw = [raw] if isinstance(raw, str) and raw.strip() else []
+        return {
+            str(item).strip()
+            for item in raw
+            if item is not None and str(item).strip()
+        }
 
     @staticmethod
     def _extract_uid_from_event(event: Any) -> str | None:
