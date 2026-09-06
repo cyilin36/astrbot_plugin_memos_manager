@@ -30,7 +30,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "1.2.0",
+    "1.5.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -132,10 +132,21 @@ class MemosManagerPlugin(Star):
     def _parse_allowed_uids(self) -> set[str]:
         """解析白名单 UID。
 
-        配置格式：逗号分隔字符串，保留非空 UID。
+        `allowed_uids` 使用 AstrBot 内置的 `list` 类型配置项，用户在
+        WebUI 中把每个 UID 作为单独一项逐条添加，无需再写逗号分隔。
+
+        兼容旧版：若升级前遗留的配置文件里仍是字符串（如
+        "uid1,uid2"），读取时会自动按逗号/换行拆分并归一。
         """
-        raw = self._cfg_str("allowed_uids", "")
-        parts = [x.strip() for x in raw.split(",") if x.strip()]
+        value = self.config.get("allowed_uids", [])
+        if isinstance(value, list):
+            raw_parts = value
+        elif isinstance(value, str) and value.strip():
+            # 旧版逗号分隔字符串兜底，保证平滑升级。
+            raw_parts = str(value).replace(",", "\n").split("\n")
+        else:
+            return set()
+        parts = [str(item).strip() for item in raw_parts if str(item).strip()]
         return set(parts)
 
     @staticmethod
