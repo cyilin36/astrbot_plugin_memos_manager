@@ -40,10 +40,10 @@
     "default": false
   },
   "allowed_uids": {
-    "type": "string",
-    "description": "允许使用插件的 UID 列表（逗号分隔，支持任意 UID 字符串）",
-    "hint": "先使用命令 /sid 获取 UID，再将多个 UID 以逗号分隔填写（精确匹配，区分大小写）。",
-    "default": ""
+    "type": "list",
+    "description": "允许使用插件的 UID 列表",
+    "hint": "先使用命令 /sid 获取 UID，再点击“修改/添加”逐条录入；如需批量添加，在弹窗中使用“批量导入”，每行一个 UID（精确匹配，区分大小写）。",
+    "default": []
   },
   "enable_memos_delete_tool": {
     "type": "bool",
