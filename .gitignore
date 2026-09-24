@@ -3,3 +3,4 @@ __pycache__/
 .gitignore
 tests/
 .DS_Store
+memos-0.31.0/

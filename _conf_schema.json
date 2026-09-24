@@ -8,13 +8,14 @@
   "memos_token": {
     "type": "string",
     "description": "Memos 访问令牌（Bearer Token）",
-    "hint": "请在 Memos 账户设置中创建 token。",
+    "hint": "Memos v0.31 请使用「个人访问令牌（PAT）」，以 memos_pat_ 开头，在 Memos 设置 → 访问令牌 中创建。旧式 JWT（eyJ... 且不带 type=access）已不被 v0.31 接受。",
     "obvious_hint": true,
     "default": ""
   },
   "default_visibility": {
     "type": "string",
-    "description": "默认笔记可见性",
+    "description": "默认笔记可见性（同时决定检索时的可见性收窄范围）",
+    "hint": "private=可读取本人全部笔记（含 PRIVATE 与所属 Space）；workspace=仅 PROTECTED 与 PUBLIC；public=仅 PUBLIC。",
     "options": ["workspace", "private", "public"],
     "default": "workspace"
   },

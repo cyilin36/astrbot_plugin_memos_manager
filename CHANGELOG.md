@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.0 - 2026-09-24
+
+适配 `usememos/memos v0.31`。本次为**破坏性更新**：不再兼容 v0.24，升级前请先升级 Memos 并重新生成令牌。
+
+### 破坏性变更
+
+- **列表接口迁移**：v0.31 已移除 `GET /api/v1/users/{user_id}/memos`，改用 `GET /api/v1/memos`；服务端按令牌用户身份自动收窄可读集合（PRIVATE 仅创建者、PROTECTED 所有登录用户、SPACE 仅该 Space 的 ACTIVE 成员）。插件不再需要从 JWT 中解析用户 ID。
+- **查询参数迁移**：`sort` / `direction` / `oldFilter` 已被移除，改为 `orderBy` 与 CEL `filter` 表达式。日期与可见性过滤已下推到服务端。
+- **令牌格式变更**：v0.31 的 access token 校验要求 `type == "access"`，旧式 JWT 会被拒绝。长期接入请使用 PAT（以 `memos_pat_` 开头）。
+
+### 变更
+
+- `display_time` 字段在 v0.31 已被删除，`date_field` 统一映射为 `create_time`（默认，`display_time` 作为兼容别名）或 `update_time`。
+- 日期区间从闭区间改为**半开区间** `[start, end)`，避免边界记录重复计入。
+- `memos_create` / `memos_update` 请求体对齐 v0.31：创建时请求体直接是 Memo，更新使用 `updateMask` 逗号分隔的 query 参数。
+- 列表分页固定 `pageSize`，避免 `pageToken` 中编码的 limit 与请求参数不一致。
+- `memos_search` 返回值新增 `property` / `space` / `parent` 字段，移除已废弃的 `display_time`。
+- WebUI 配置文案更新：`default_visibility` 说明其同时决定检索可见性范围；`memos_token` 提示改用 PAT。
+- 新增 `tests/test_v031.py`，覆盖可见性 CEL 映射、日期区间与请求形状。
+
 ## v1.2.1 - 2026-09-07
 
 - `allowed_uids` 改用 AstrBot 内置的 `list` 类型配置项：在 WebUI 中逐条添加 UID（支持批量导入，每行一个），不再需要逗号分隔填写。

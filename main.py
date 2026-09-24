@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
@@ -13,16 +13,26 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 try:
     from .memos_client import MemosClient, MemosClientError
     from .tool_models import (
+        build_timestamp_clause,
+        combine_cel_clauses,
+        map_date_field_to_cel,
         map_visibility_label_to_api,
         normalize_visibility_label,
+        parse_date_bound,
         readable_visibilities,
+        visibility_filter_clause,
     )
 except ImportError:
     from memos_client import MemosClient, MemosClientError
     from tool_models import (
+        build_timestamp_clause,
+        combine_cel_clauses,
+        map_date_field_to_cel,
         map_visibility_label_to_api,
         normalize_visibility_label,
+        parse_date_bound,
         readable_visibilities,
+        visibility_filter_clause,
     )
 
 
@@ -30,7 +40,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "1.2.1",
+    "2.0.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -306,8 +316,8 @@ class MemosManagerPlugin(Star):
         return text or None
 
     @staticmethod
-    def _parse_date_field(raw: Any, default: str = "display_time") -> str:
-        """解析日期字段，仅允许 display_time/create_time/update_time。"""
+    def _parse_date_field(raw: Any, default: str = "create_time") -> str:
+        """解析日期字段，仅允许 create_time/update_time（display_time 为兼容别名）。"""
         text = str(raw or default).strip().lower()
         if text in {"display_time", "create_time", "update_time"}:
             return text
@@ -345,41 +355,12 @@ class MemosManagerPlugin(Star):
     # ------------------------------
 
     def _parse_date_bound(self, raw: str | None, *, is_end: bool) -> datetime | None:
-        """解析日期上下界。
+        """解析日期上下界，返回 UTC datetime。
 
-        支持：
-        - YYYY-MM-DD
-        - ISO8601
+        具体解析与半开区间语义见 `tool_models.parse_date_bound`；
+        这里注入本地时区，保证与既有行为一致。
         """
-        if raw is None:
-            return None
-        text = raw.strip()
-        if not text:
-            return None
-        tz = self._local_tz()
-        try:
-            if len(text) == 10:
-                day = date.fromisoformat(text)
-                if is_end:
-                    dt = datetime.combine(day, time(23, 59, 59), tzinfo=tz)
-                else:
-                    dt = datetime.combine(day, time(0, 0, 0), tzinfo=tz)
-            else:
-                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=tz)
-            return dt.astimezone(timezone.utc)
-        except ValueError as exc:
-            raise ValueError(f"invalid date format: {raw}") from exc
-
-    def _parse_memo_time(self, raw: Any) -> datetime | None:
-        """解析 memo 返回的时间字段为 UTC datetime。"""
-        if not isinstance(raw, str) or not raw:
-            return None
-        try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except ValueError:
-            return None
+        return parse_date_bound(raw, is_end=is_end, tz=self._local_tz())
 
     @staticmethod
     def _memo_match_keyword(memo: dict[str, Any], query: str) -> bool:
@@ -398,26 +379,28 @@ class MemosManagerPlugin(Star):
         include_archived: bool = False,
         start_date: str | None = None,
         end_date: str | None = None,
-        date_field: str = "display_time",
+        date_field: str = "create_time",
     ) -> dict[str, Any]:
-        """执行 memos 搜索。
+        """执行 memos 搜索（Memos v0.31）。
 
         流程：
-        1) 可见性过滤
-        2) 日期过滤
-        3) 关键词过滤
-        4) 截断到 search_max_count
+        1) 组装服务端 CEL：可见性 + 时间半开区间
+        2) 服务端按 CEL 分页返回（固定 pageSize，避免 pageToken 失效）
+        3) 插件侧关键词过滤 content/snippet/tags
+        4) 可见性兜底校验并截断到 search_max_count
         """
         trace_id = self._trace_id()
         steps: list[str] = []
         search_max_count = self._cfg_int("search_max_count", 50)
         selected_date_field = self._parse_date_field(date_field)
+        cel_field = map_date_field_to_cel(selected_date_field)
         configured_visibility = self._cfg_str("default_visibility", "workspace")
         allowed_visibilities = readable_visibilities(configured_visibility)
         steps.append(
             f"start memos_search trace={trace_id} query_present={bool(query and query.strip())} "
             f"include_archived={include_archived} search_max_count={search_max_count} "
-            f"start_date={start_date!r} end_date={end_date!r} date_field={selected_date_field}"
+            f"start_date={start_date!r} end_date={end_date!r} date_field={selected_date_field} "
+            f"cel_field={cel_field}"
         )
         try:
             start_dt = self._parse_date_bound(start_date, is_end=False)
@@ -433,22 +416,20 @@ class MemosManagerPlugin(Star):
 
             client = self._build_client()
 
-            # v0.24 的 display_time 区间在 oldFilter 中可直接走服务端过滤。
-            old_filter_parts: list[str] = []
-            if selected_date_field == "display_time":
-                if start_dt is not None:
-                    old_filter_parts.append(f"display_time_after == {int(start_dt.timestamp())}")
-                if end_dt is not None:
-                    old_filter_parts.append(f"display_time_before == {int(end_dt.timestamp())}")
-            old_filter = " && ".join(old_filter_parts) if old_filter_parts else None
+            # v0.31：可见性与时间过滤全部下推到服务端 CEL。
+            visibility_clause = visibility_filter_clause(configured_visibility)
+            time_clause = build_timestamp_clause(cel_field, start_dt, end_dt)
+            filter_cel = combine_cel_clauses(visibility_clause, time_clause)
+            steps.append(f"server_filter_cel={filter_cel!r}")
 
             query_text = (query or "").strip()
             query_mode = "keyword" if query_text else "recent"
 
+            # pageToken 内编码 limit，翻页时必须保持固定 pageSize。
             page_size = 100
             page_token: str | None = None
             scanned_count = 0
-            date_filtered_count = 0
+            visibility_filtered_count = 0
             keyword_filtered_count = 0
             page_count = 0
             result_memos: list[dict[str, Any]] = []
@@ -459,36 +440,24 @@ class MemosManagerPlugin(Star):
                     page_size=page_size,
                     page_token=page_token,
                     include_archived=include_archived,
-                    old_filter=old_filter,
+                    filter_cel=filter_cel,
                 )
                 if not memos_page:
                     break
                 scanned_count += len(memos_page)
 
+                # 服务端已按可见性收窄，这里再做一次防御性校验。
                 visibility_kept = [
                     memo
                     for memo in memos_page
                     if memo.get("visibility") in allowed_visibilities
                 ]
-
-                date_kept: list[dict[str, Any]] = []
-                for memo in visibility_kept:
-                    # 当不是 display_time 时，日期过滤由插件侧补上。
-                    if selected_date_field != "display_time":
-                        target_dt = self._parse_memo_time(memo.get(selected_date_field))
-                        if target_dt is None:
-                            continue
-                        if start_dt is not None and target_dt < start_dt:
-                            continue
-                        if end_dt is not None and target_dt > end_dt:
-                            continue
-                    date_kept.append(memo)
-                date_filtered_count += len(date_kept)
+                visibility_filtered_count += len(visibility_kept)
 
                 if query_text:
-                    keyword_kept = [m for m in date_kept if self._memo_match_keyword(m, query_text)]
+                    keyword_kept = [m for m in visibility_kept if self._memo_match_keyword(m, query_text)]
                 else:
-                    keyword_kept = date_kept
+                    keyword_kept = visibility_kept
                 keyword_filtered_count += len(keyword_kept)
 
                 for memo in keyword_kept:
@@ -509,8 +478,9 @@ class MemosManagerPlugin(Star):
             else:
                 steps.append("keyword_filter_skipped query_empty=true")
             steps.append(
-                f"pipeline_done pages={page_count} scanned={scanned_count} date_kept={date_filtered_count} "
-                f"keyword_kept={keyword_filtered_count} final={len(result_memos)}"
+                f"pipeline_done pages={page_count} scanned={scanned_count} "
+                f"visibility_kept={visibility_filtered_count} keyword_kept={keyword_filtered_count} "
+                f"final={len(result_memos)}"
             )
 
             logger.info(f"[memos_search] trace={trace_id} ok returned={len(result_memos)}")
@@ -530,10 +500,12 @@ class MemosManagerPlugin(Star):
                         "query_mode": query_mode,
                         "final_return_limit": search_max_count,
                         "selected_date_field": selected_date_field,
+                        "cel_time_field": cel_field,
+                        "filter_cel": filter_cel,
                         "start_date": start_date,
                         "end_date": end_date,
                         "scanned_count": scanned_count,
-                        "date_filtered_count": date_filtered_count,
+                        "visibility_kept_count": visibility_filtered_count,
                         "keyword_filtered_count": keyword_filtered_count,
                         "matched_count": len(result_memos),
                     },
@@ -789,7 +761,7 @@ class MemosManagerPlugin(Star):
         query: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
-        date_field: str = "display_time",
+        date_field: str = "create_time",
     ) -> dict[str, Any]:
         """查询已归档 memo 列表。"""
         search_result = await self.run_search(
@@ -860,8 +832,8 @@ class MemosSearchTool(BaseMemosTool):
             },
             "date_field": {
                 "type": "string",
-                "description": "日期字段：display_time/create_time/update_time。",
-                "default": "display_time",
+                "description": "日期字段：create_time（默认，别名 display_time）/update_time。",
+                "default": "create_time",
             },
         },
         "required": [],
@@ -877,7 +849,7 @@ class MemosSearchTool(BaseMemosTool):
             return denied
 
         query = self.plugin._parse_optional_text(kwargs.get("query"))
-        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "display_time"))
+        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "create_time"))
         return await self.plugin.run_search(
             query=query,
             include_archived=False,
@@ -1023,15 +995,15 @@ class MemosArchiveTool(BaseMemosTool):
             },
             "date_field": {
                 "type": "string",
-                "description": "日期字段：display_time/create_time/update_time。action=list_archived 时生效。",
-                "default": "display_time",
+                "description": "日期字段：create_time（默认，别名 display_time）/update_time。action=list_archived 时生效。",
+                "default": "create_time",
             },
         },
         "required": [],
     }
 
     async def _handle_archive_list(self, kwargs: dict[str, Any]) -> ToolExecResult:
-        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "display_time"))
+        selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "create_time"))
         return await self.plugin.run_archive_list(
             query=self.plugin._parse_optional_text(kwargs.get("query")),
             start_date=kwargs.get("start_date"),
