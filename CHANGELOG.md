@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.0.0 - 2026-09-24
+## v2.1.0 - 2026-09-24
 
 适配 `usememos/memos v0.31`。本次为**破坏性更新**：不再兼容 v0.24，升级前请先升级 Memos 并重新生成令牌。
 
@@ -18,7 +18,6 @@
 - 列表分页固定 `pageSize`，避免 `pageToken` 中编码的 limit 与请求参数不一致。
 - `memos_search` 返回值新增 `property` / `space` / `parent` 字段，移除已废弃的 `display_time`。
 - WebUI 配置文案更新：`default_visibility` 说明其同时决定检索可见性范围；`memos_token` 提示改用 PAT。
-- 新增 `tests/test_v031.py`，覆盖可见性 CEL 映射、日期区间与请求形状。
 
 ## v1.2.1 - 2026-09-07
 

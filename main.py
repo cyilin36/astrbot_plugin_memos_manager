@@ -40,7 +40,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "2.0.0",
+    "2.1.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
