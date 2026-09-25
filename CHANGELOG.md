@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.2.0 - 2026-09-25
+
+新增独立的文件（附件）管理工具 `memos_file`，与 `memos_update` 的文字编辑职责分离。
+
+### 新增
+
+- 新工具 `memos_file`，支持三个动作：
+  - `upload`：把图片上传并绑定到指定笔记；
+  - `list`：列出笔记当前的附件；
+  - `remove`：从笔记删除附件（默认关闭）。
+- 上传图片来源：`url` / `path` 参数，或自动读取当前聊天消息中的图片（含被引用消息里的图片），多张图会全部上传到同一笔记。
+- 新增配置项：
+  - `enable_memos_file_delete_tool`：启用附件删除动作（默认 `false`）；
+  - `file_upload_max_mb`：单张图片上传大小上限（默认 16 MB，服务端默认为 32 MB）；
+  - `file_download_timeout_seconds`：下载远程图片的超时时间（默认 30 秒）。
+
+### 变更
+
+- `memos_search` / `memos_update` 等返回的 memo 现在包含 `attachments` 字段（`name` / `filename` / `type` / `size` / `memo` / `create_time`），便于定位附件资源名。
+- 删除附件遇到 `412` 时返回明确提示，引导先用 `memos_update` 移除正文引用。
+
+### 说明
+
+- 文件工具**不修改笔记正文**：上传后的图片以附件区形式展示；如需正文内嵌，请用 `memos_update` 编辑正文。
+- Memos v0.31 没有“仅解绑保留文件”的接口，从笔记移除附件即**永久删除文件**，故删除动作默认关闭。
+- 服务端将附件删除限制为创建者本人，管理员也无法删除他人附件。
+
 ## v2.1.0 - 2026-09-24
 
 适配 `usememos/memos v0.31`。本次为**破坏性更新**：不再兼容 v0.24，升级前请先升级 Memos 并重新生成令牌。

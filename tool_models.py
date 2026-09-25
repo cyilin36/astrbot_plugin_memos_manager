@@ -23,6 +23,47 @@ DATE_FIELD_TO_CEL = {
 
 CEL_TIMESTAMP_FIELDS = frozenset({"created_ts", "updated_ts"})
 
+# MIME 到扩展名的兜底映射：当文件名没有扩展名、但能确定 MIME 时用于补全。
+# Memos 的 validateFilename 拒绝以点或空格开头/结尾的文件名，且附件类型依赖
+# 扩展名或内容嗅探，因此补全扩展名能提升识别成功率。
+MIME_EXTENSION_FALLBACK = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+    "image/tiff": ".tiff",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
+
+
+def normalize_image_filename(
+    filename: str | None,
+    mime_type: str = "",
+    index: int = 1,
+) -> str:
+    """清洗附件文件名，保证符合 Memos v0.31 的 validateFilename 规则。
+
+    服务端会拒绝：包含路径分隔符、以点或空格开头/结尾、以及路径穿越的名字。
+    这里同时剥离 URL 可能带上的查询串/片段，并在缺少扩展名时按 MIME 补全。
+    """
+    raw = str(filename or "").strip().replace("\\", "_").replace("/", "_")
+    # 剥离可能的目录前缀残留与 URL 的查询串/片段。
+    raw = raw.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0].strip()
+    # 服务端拒绝以点/空格开头或结尾的名字；先归一化再判断扩展名，
+    # 否则空名字会被拼成 ".png" 并被 strip 成 "png"。
+    raw = raw.strip(" .")
+    if not raw:
+        raw = f"image_{index}"
+
+    if "." not in raw or raw.endswith("."):
+        raw = f"{raw}{MIME_EXTENSION_FALLBACK.get(mime_type, '.png')}"
+
+    return raw
+
 
 def normalize_visibility_label(raw: str | None) -> str:
     value = (raw or "workspace").strip().lower()

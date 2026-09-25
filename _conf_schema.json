@@ -50,5 +50,22 @@
     "type": "bool",
     "description": "是否启用 memos_delete 工具（默认关闭）",
     "default": false
+  },
+  "enable_memos_file_delete_tool": {
+    "type": "bool",
+    "description": "是否启用 memos_file 的删除附件动作（默认关闭）",
+    "hint": "Memos v0.31 没有「仅解绑保留文件」的接口，从笔记移除附件即永久删除该文件，且不可恢复，因此默认关闭。",
+    "default": false
+  },
+  "file_upload_max_mb": {
+    "type": "int",
+    "description": "memos_file 单张图片上传大小上限（MB）",
+    "hint": "插件侧的提前护栏，避免把超大图片发往 Memos。Memos 服务端默认上限为 32 MB，此处默认 16 MB。",
+    "default": 16
+  },
+  "file_download_timeout_seconds": {
+    "type": "int",
+    "description": "下载远程图片（url 参数）的超时时间（秒）",
+    "default": 30
   }
 }

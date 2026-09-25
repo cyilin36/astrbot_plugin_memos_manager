@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import mimetypes
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +19,7 @@ try:
         combine_cel_clauses,
         map_date_field_to_cel,
         map_visibility_label_to_api,
+        normalize_image_filename,
         normalize_visibility_label,
         parse_date_bound,
         readable_visibilities,
@@ -29,6 +32,7 @@ except ImportError:
         combine_cel_clauses,
         map_date_field_to_cel,
         map_visibility_label_to_api,
+        normalize_image_filename,
         normalize_visibility_label,
         parse_date_bound,
         readable_visibilities,
@@ -40,7 +44,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "2.1.0",
+    "2.2.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -70,6 +74,8 @@ class MemosManagerPlugin(Star):
         ]
         if self._cfg_bool("enable_memos_delete_tool", False):
             tools.append(MemosDeleteTool(self))
+        # 文件工具常驻注册（upload/list 安全）；删除动作在工具内部再按开关收紧。
+        tools.append(MemosFileTool(self))
         self.context.add_llm_tools(*tools)
 
     # ------------------------------
@@ -788,6 +794,490 @@ class MemosManagerPlugin(Star):
         search_result["result"] = result
         return search_result
 
+    # ------------------------------
+    # 文件（附件）相关
+    # ------------------------------
+
+    def _file_delete_enabled(self) -> bool:
+        """文件删除动作是否启用（默认关闭，与 memos_delete 一致的保守策略）。"""
+        return self._cfg_bool("enable_memos_file_delete_tool", False)
+
+    def _file_upload_max_bytes(self) -> int:
+        """插件侧单张图片大小护栏（字节）。"""
+        max_mb = self._cfg_int("file_upload_max_mb", 16)
+        if max_mb <= 0:
+            max_mb = 16
+        return max_mb * 1024 * 1024
+
+    @staticmethod
+    def _guess_mime_type(filename: str, content: bytes | None = None) -> str:
+        """推断 MIME。优先扩展名，其次由内容嗅探，失败返回空串交给服务端。"""
+        guessed, _ = mimetypes.guess_type(filename or "")
+        if guessed:
+            return guessed
+        if content:
+            try:
+                import imghdr  # 仅用于图片魔数嗅探；3.13 起移除，故做容错。
+            except ImportError:
+                return ""
+            try:
+                kind = imghdr.what(None, h=content[:32])
+            except Exception:
+                return ""
+            if kind:
+                return f"image/{kind}"
+        return ""
+
+    @staticmethod
+    def _normalize_image_filename(filename: str, mime_type: str, index: int) -> str:
+        """清洗文件名，保证符合 Memos 的 validateFilename 规则。
+
+        具体规则与 MIME 扩展名补全见 `tool_models.normalize_image_filename`。
+        """
+        return normalize_image_filename(filename, mime_type, index)
+
+    async def _load_image_from_path(self, path: str, filename: str | None) -> tuple[str, bytes]:
+        """从本地路径读取一张图片，返回 (filename, content)。"""
+        clean_path = self._parse_optional_text(path)
+        if not clean_path:
+            raise ValueError("path 不能为空")
+        try:
+            with open(clean_path, "rb") as handle:
+                content = handle.read()
+        except OSError as exc:
+            raise ValueError(f"无法读取本地图片：{exc}") from exc
+        if not content:
+            raise ValueError(f"图片文件为空：{clean_path}")
+        name = self._parse_optional_text(filename) or os.path.basename(clean_path)
+        return name, content
+
+    async def _load_image_from_url(self, url: str, filename: str | None) -> tuple[str, bytes]:
+        """从 http(s) URL 下载一张图片，返回 (filename, content)。"""
+        clean_url = self._parse_optional_text(url)
+        if not clean_url:
+            raise ValueError("url 不能为空")
+        if not clean_url.lower().startswith(("http://", "https://")):
+            raise ValueError("url 必须是 http:// 或 https:// 开头")
+
+        import httpx
+
+        timeout = self._cfg_int("file_download_timeout_seconds", 30)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                response = await client.get(clean_url)
+                response.raise_for_status()
+                content = response.content
+        except httpx.HTTPStatusError as exc:
+            raise ValueError(
+                f"下载图片失败：目标返回 HTTP {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ValueError(f"下载图片失败：{exc}") from exc
+
+        if not content:
+            raise ValueError(f"下载到的图片为空：{clean_url}")
+
+        name = self._parse_optional_text(filename)
+        if not name:
+            # 从 URL 路径推断文件名，失败则交由上层生成。
+            guess = str(response.url).split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            name = os.path.basename(guess) if guess else ""
+        return name, content
+
+    def _collect_images_from_event(self, event: Any) -> list[Any]:
+        """从事件中收集图片组件，包含被引用消息（Reply.chain）里的图片。"""
+        if event is None:
+            return []
+
+        get_messages = getattr(event, "get_messages", None)
+        components = get_messages() if callable(get_messages) else None
+        if not components:
+            message_obj = getattr(event, "message_obj", None)
+            components = getattr(message_obj, "message", None)
+        if not components:
+            return []
+
+        try:
+            from astrbot.api.message_components import Image, Reply
+        except ImportError:
+            return []
+
+        collected: list[Any] = []
+
+        def walk(items: Any, depth: int = 0) -> None:
+            if depth > 3 or not items:
+                return
+            for comp in items:
+                if isinstance(comp, Image):
+                    collected.append(comp)
+                elif isinstance(comp, Reply):
+                    chain = getattr(comp, "chain", None)
+                    if chain:
+                        walk(chain, depth + 1)
+
+        walk(components)
+        return collected
+
+    async def _load_chat_images(self, context: ContextWrapper[AstrAgentContext]) -> list[tuple[str, bytes]]:
+        """把当前消息（含引用消息）里的图片转换为 (filename, content) 列表。"""
+        inner_ctx = getattr(context, "context", None)
+        event = getattr(inner_ctx, "event", None) or getattr(context, "event", None)
+
+        components = self._collect_images_from_event(event)
+        loaded: list[tuple[str, bytes]] = []
+        for comp in components:
+            try:
+                local_path = await comp.convert_to_file_path()
+            except Exception as exc:
+                logger.warning("[memos_file] 跳过无法读取的聊天图片: %s", exc)
+                continue
+            if not local_path:
+                continue
+            try:
+                with open(local_path, "rb") as handle:
+                    content = handle.read()
+            except OSError as exc:
+                logger.warning("[memos_file] 读取本地图片失败: %s", exc)
+                continue
+            if not content:
+                continue
+            loaded.append((os.path.basename(local_path), content))
+        return loaded
+
+    async def _resolve_upload_images(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        *,
+        url: str | None,
+        path: str | None,
+        filename: str | None,
+    ) -> list[tuple[str, bytes]]:
+        """确定本次要上传的图片集合。
+
+        显式 url/path 优先；两者都缺省时，回退到当前聊天消息里的图片。
+        """
+        explicit_url = self._parse_optional_text(url)
+        explicit_path = self._parse_optional_text(path)
+
+        if explicit_url and explicit_path:
+            raise ValueError("url 与 path 只能二选一")
+        if explicit_url:
+            return [await self._load_image_from_url(explicit_url, filename)]
+        if explicit_path:
+            return [await self._load_image_from_path(explicit_path, filename)]
+        return await self._load_chat_images(context)
+
+    async def run_file_upload(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        name: str,
+        url: str | None = None,
+        path: str | None = None,
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """上传图片并绑定到指定 memo（只动附件列表，绝不修改正文）。"""
+        trace_id = self._trace_id()
+        steps: list[str] = []
+        try:
+            memo_name = str(name or "").strip()
+            if not memo_name:
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="missing_memo_name",
+                    message="name is required",
+                )
+            if not memo_name.startswith("memos/"):
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="invalid_memo_name",
+                    message="memo name 必须以 memos/ 开头，例如 memos/xxxx",
+                )
+
+            try:
+                images = await self._resolve_upload_images(
+                    context, url=url, path=path, filename=filename
+                )
+            except ValueError as exc:
+                return self._tool_input_error(
+                    trace_id=trace_id, code="invalid_image_source", message=str(exc)
+                )
+
+            if not images:
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="no_image_found",
+                    message="没有找到可上传的图片：请在消息中附带图片，或显式提供 url/path 参数",
+                )
+
+            max_bytes = self._file_upload_max_bytes()
+            for _, content in images:
+                if len(content) > max_bytes:
+                    return self._tool_input_error(
+                        trace_id=trace_id,
+                        code="image_too_large",
+                        message=(
+                            f"图片大小 {len(content)} 字节超过插件上限 "
+                            f"{max_bytes} 字节，请调大 file_upload_max_mb 或压缩图片"
+                        ),
+                    )
+
+            steps.append(
+                f"start memos_file upload trace={trace_id} memo={memo_name} count={len(images)}"
+            )
+            client = self._build_client()
+            uploaded: list[dict[str, Any]] = []
+            for index, (raw_name, content) in enumerate(images, start=1):
+                mime_type = self._guess_mime_type(raw_name, content)
+                safe_name = self._normalize_image_filename(raw_name, mime_type, index)
+                attachment = await client.create_attachment(
+                    filename=safe_name,
+                    content=content,
+                    mime_type=mime_type,
+                    memo_name=memo_name,
+                )
+                uploaded.append(attachment)
+                steps.append(
+                    f"uploaded index={index} name={attachment.get('name', '')} "
+                    f"filename={attachment.get('filename', '')}"
+                )
+
+            logger.info(
+                "[memos_file] trace=%s upload ok memo=%s count=%d",
+                trace_id,
+                memo_name,
+                len(uploaded),
+            )
+            return {
+                "ok": True,
+                "trace_id": trace_id,
+                "result": {
+                    "memo": memo_name,
+                    "count": len(uploaded),
+                    "uploaded": uploaded,
+                    "note": (
+                        "附件已绑定到该 memo，以附件区形式展示；"
+                        "本次未修改笔记正文。如需在正文中内嵌图片，请用 memos_update 编辑正文。"
+                    ),
+                },
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_file] trace=%s upload failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+        except Exception as exc:
+            steps.append(f"error message={exc}")
+            logger.exception("[memos_file] trace=%s upload failed", trace_id)
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+
+    async def run_file_list(self, name: str) -> dict[str, Any]:
+        """列出指定 memo 当前绑定的附件。"""
+        trace_id = self._trace_id()
+        steps: list[str] = []
+        try:
+            memo_name = str(name or "").strip()
+            if not memo_name.startswith("memos/"):
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="invalid_memo_name",
+                    message="memo name 必须以 memos/ 开头，例如 memos/xxxx",
+                )
+
+            steps.append(f"start memos_file list trace={trace_id} memo={memo_name}")
+            client = self._build_client()
+            attachments = await client.list_memo_attachments(memo_name)
+            steps.append(f"list_done count={len(attachments)}")
+            return {
+                "ok": True,
+                "trace_id": trace_id,
+                "result": {
+                    "memo": memo_name,
+                    "count": len(attachments),
+                    "attachments": attachments,
+                },
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_file] trace=%s list failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+        except Exception as exc:
+            steps.append(f"error message={exc}")
+            logger.exception("[memos_file] trace=%s list failed", trace_id)
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+
+    async def run_file_remove(
+        self,
+        name: str,
+        attachment: str | None = None,
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        """从指定 memo 删除一个附件。
+
+        安全性设计：
+        1. 先确认目标附件确实绑定在该 memo 上，避免误删其它 memo 的文件。
+        2. 只接受能唯一确定的附件（资源名或唯一文件名），歧义时拒绝执行。
+
+        注意：v0.31 没有「仅解绑」语义，删除即永久移除文件。
+        """
+        trace_id = self._trace_id()
+        steps: list[str] = []
+        try:
+            memo_name = str(name or "").strip()
+            if not memo_name.startswith("memos/"):
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="invalid_memo_name",
+                    message="memo name 必须以 memos/ 开头，例如 memos/xxxx",
+                )
+
+            if not self._file_delete_enabled():
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="file_delete_disabled",
+                    message=(
+                        "文件删除功能未启用：请在插件 WebUI 配置中开启 "
+                        "enable_memos_file_delete_tool 后重试"
+                    ),
+                )
+
+            goal_name = self._parse_optional_text(attachment)
+            goal_filename = self._parse_optional_text(filename)
+
+            if not goal_name and not goal_filename:
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="missing_attachment_target",
+                    message="请提供 attachment（attachments/xxxx）或 filename 以指定要删除的附件",
+                )
+
+            steps.append(f"start memos_file remove trace={trace_id} memo={memo_name}")
+            client = self._build_client()
+
+            # 前置校验：附件必须属于该 memo。
+            bound = await client.list_memo_attachments(memo_name)
+            steps.append(f"listed_bound count={len(bound)}")
+
+            if goal_name:
+                matches = [item for item in bound if item.get("name") == goal_name]
+                if not matches:
+                    return {
+                        "ok": False,
+                        "trace_id": trace_id,
+                        "result": {},
+                        "audit": self._build_audit(trace_id, steps),
+                        "errors": [
+                            f"附件 {goal_name} 未绑定在该 memo 上，已拒绝删除以避免误删其它笔记的文件"
+                        ],
+                    }
+                target = matches[0]
+            else:
+                matches = [
+                    item
+                    for item in bound
+                    if str(item.get("filename", "")).strip() == goal_filename
+                ]
+                if not matches:
+                    return {
+                        "ok": False,
+                        "trace_id": trace_id,
+                        "result": {"attachments": bound},
+                        "audit": self._build_audit(trace_id, steps),
+                        "errors": [f"该 memo 上未找到文件名为 {goal_filename} 的附件"],
+                    }
+                if len(matches) > 1:
+                    return {
+                        "ok": False,
+                        "trace_id": trace_id,
+                        "result": {"attachments": bound},
+                        "audit": self._build_audit(trace_id, steps),
+                        "errors": [
+                            f"文件名 {goal_filename} 匹配到 {len(matches)} 个附件，"
+                            "请改用 attachment 参数（attachments/xxxx）精确指定"
+                        ],
+                    }
+                target = matches[0]
+
+            target_name = str(target.get("name", ""))
+            await client.delete_attachment(target_name)
+            steps.append(f"deleted name={target_name}")
+
+            logger.info(
+                "[memos_file] trace=%s remove ok memo=%s attachment=%s",
+                trace_id,
+                memo_name,
+                target_name,
+            )
+            return {
+                "ok": True,
+                "trace_id": trace_id,
+                "result": {
+                    "memo": memo_name,
+                    "deleted": target,
+                    "note": "附件已删除（Memos v0.31 从笔记移除附件即永久删除文件）。",
+                },
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [],
+            }
+        except MemosClientError as exc:
+            steps.append(f"error type=memos_client_error message={exc}")
+            logger.error(
+                "[memos_file] trace=%s remove failed: %s",
+                trace_id,
+                getattr(exc, "debug_message", str(exc)),
+            )
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+        except Exception as exc:
+            steps.append(f"error message={exc}")
+            logger.exception("[memos_file] trace=%s remove failed", trace_id)
+            return {
+                "ok": False,
+                "trace_id": trace_id,
+                "result": {},
+                "audit": self._build_audit(trace_id, steps),
+                "errors": [str(exc)],
+            }
+
 
 class BaseMemosTool(FunctionTool[AstrAgentContext]):
     """所有 Memos Tool 的基类，提供统一鉴权入口。"""
@@ -959,6 +1449,92 @@ class MemosDeleteTool(BaseMemosTool):
             return denied
 
         return await self.plugin.run_delete(name=str(kwargs["name"]))
+
+
+class MemosFileTool(BaseMemosTool):
+    name = "memos_file"
+    description = (
+        "管理笔记的图片附件：把图片上传并绑定到指定笔记、列出笔记的附件、或从笔记删除附件。"
+        "本工具只操作附件，不会修改笔记正文；编辑文字请使用 memos_update。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "操作类型：upload（上传并绑定）、list（列出附件）、remove（删除附件）。",
+                "default": "upload",
+            },
+            "name": {
+                "type": "string",
+                "description": "笔记资源名，例如 memos/xxxx。",
+            },
+            "url": {
+                "type": "string",
+                "description": "可选：要上传的图片 http(s) 地址。action=upload 时生效。",
+            },
+            "path": {
+                "type": "string",
+                "description": "可选：要上传的图片本地路径。action=upload 时生效。",
+            },
+            "filename": {
+                "type": "string",
+                "description": (
+                    "可选：上传时的文件名（用于命名和类型识别）；"
+                    "action=remove 时也可作为附件定位方式。"
+                ),
+            },
+            "attachment": {
+                "type": "string",
+                "description": "附件资源名，例如 attachments/xxxx。action=remove 时优先使用。",
+            },
+        },
+        "required": ["action", "name"],
+    }
+
+    async def _handle_upload(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
+        return await self.plugin.run_file_upload(
+            context,
+            name=str(kwargs.get("name", "")),
+            url=kwargs.get("url"),
+            path=kwargs.get("path"),
+            filename=kwargs.get("filename"),
+        )
+
+    async def _handle_remove(self, kwargs: dict[str, Any]) -> ToolExecResult:
+        return await self.plugin.run_file_remove(
+            name=str(kwargs.get("name", "")),
+            attachment=kwargs.get("attachment"),
+            filename=kwargs.get("filename"),
+        )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        **kwargs: Any,
+    ) -> ToolExecResult:
+        denied = self._check_auth_or_return(context, self.name)
+        if denied is not None:
+            return denied
+
+        action = self.plugin._parse_action(kwargs.get("action", "upload"))
+        if action == "upload":
+            return await self._handle_upload(context, kwargs)
+        if action == "list":
+            return await self.plugin.run_file_list(name=str(kwargs.get("name", "")))
+        if action == "remove":
+            return await self._handle_remove(kwargs)
+
+        trace_id = self.plugin._trace_id()
+        return self.plugin._tool_input_error(
+            trace_id=trace_id,
+            code="invalid_action",
+            message="action must be one of: upload, list, remove",
+        )
 
 
 class MemosArchiveTool(BaseMemosTool):

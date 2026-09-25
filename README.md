@@ -9,6 +9,39 @@
 - `memos_update`：更新笔记内容/可见性/置顶
 - `memos_archive`：查询已归档 / 设置归档状态
 - `memos_delete`：删除笔记（默认关闭，需在 WebUI 启用）
+- `memos_file`：管理笔记的图片附件（上传/列出/删除）
+
+## 文件（附件）管理
+
+`memos_file` 专门负责图片附件，与 `memos_update` 的纯文字编辑**职责分离**：本工具只操作附件列表，**不会修改笔记正文**。编辑文字请使用 `memos_update`。
+
+| `action` | 说明 |
+| --- | --- |
+| `upload` | 把图片上传并绑定到指定笔记 |
+| `list` | 列出笔记当前的附件 |
+| `remove` | 从笔记删除附件（默认关闭，需在 WebUI 启用） |
+
+上传图片来源，按优先级：
+
+1. `url` 参数：http(s) 图片地址；
+2. `path` 参数：服务器本地图片路径；
+3. 两者都不填时，自动取**当前聊天消息中的图片**（含被引用消息里的图片），多张会全部上传到同一笔记。
+
+示例：
+
+- “把这张图传到 memos/xxxx。”（消息中带图）
+- “把 https://example.com/a.png 传到 memos/xxxx。”
+- “列出 memos/xxxx 的附件。”
+- “把 memos/xxxx 上的 a.png 删掉。”
+
+### 能力边界与注意事项
+
+1. **删除即永久删除**：Memos v0.31 没有“仅从笔记解绑、保留文件”的接口，`remove` 会真正删除文件且不可恢复，因此默认关闭。
+2. **删除被正文引用的图片会被服务端拒绝**。若正文里有 `![...](/file/attachments/xxxx)` 引用，请先用 `memos_update` 移除该引用，再删除附件。
+3. **只能删除自己上传的附件**：服务端把 `DELETE` 范围限制在附件创建者本人；即使实例管理员也删不了别人的附件。
+4. **只上传、不改正文**：上传后的图片以**附件区**形式展示在正文下方。若想在正文中内嵌图片，请用 `memos_update` 编辑正文并写入 `![名称](/file/attachments/{附件ID})`。
+5. `remove` 需要提供 `attachment`（`attachments/xxxx`）或 `filename`；按文件名匹配到多个附件时会拒绝执行并提示改用资源名。
+6. 删除前会先校验附件确实绑定在该笔记上，避免误删其它笔记的文件。
 
 ## WebUI 配置
 
@@ -18,6 +51,9 @@
 - `enable_uid_auth`：是否启用 UID 白名单鉴权
 - `allowed_uids`：允许使用插件的 UID 列表
 - `enable_memos_delete_tool`：是否启用 `memos_delete`（默认关闭）
+- `enable_memos_file_delete_tool`：是否启用 `memos_file` 的删除附件动作（默认关闭）
+- `file_upload_max_mb`：单张图片上传大小上限（MB，默认 16）
+- `file_download_timeout_seconds`：下载远程图片的超时时间（秒，默认 30）
 
 ### 如何获取令牌（v0.31）
 
