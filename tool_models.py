@@ -149,6 +149,52 @@ def combine_cel_clauses(*clauses: str | None) -> str | None:
     return " && ".join(parts)
 
 
+def escape_cel_string(value: str) -> str:
+    """转义 CEL 字符串字面量中的特殊字符。
+
+    filter 是拼接出来的 CEL 表达式（如 `filename.contains("...")`），
+    用户关键词里的引号或反斜杠会破坏表达式结构，必须转义。
+    反斜杠要最先处理，否则会把后续插入的转义符再次转义。
+    """
+    text = str(value)
+    # 控制字符（含换行/制表）在 CEL 单行字面量里没有意义，统一折叠为空格。
+    text = "".join(" " if ch in "\r\n\t" else ch for ch in text)
+    text = text.replace("\\", "\\\\")
+    text = text.replace('"', '\\"')
+    return text
+
+
+def build_attachment_filter_clause(
+    *,
+    query: str | None = None,
+    image_only: bool = False,
+    unbound_only: bool = False,
+) -> str | None:
+    """构建附件全局搜索（GET /api/v1/attachments）的 CEL filter 子句。
+
+    可用字段（见 filter/schema.go 的 NewAttachmentSchema）：
+    - filename：支持 contains
+    - mime_type：对应存储列 attachment.type，支持 contains
+    - memo_id：仅支持 == / !=，`== null` 渲染为 IS NULL
+
+    无任何筛选时返回 None，避免发送空 filter。
+    """
+    clauses: list[str] = []
+
+    keyword = (query or "").strip()
+    if keyword:
+        clauses.append(f'filename.contains("{escape_cel_string(keyword)}")')
+
+    if image_only:
+        clauses.append('mime_type.contains("image/")')
+
+    if unbound_only:
+        # 未绑定 memo 的附件：memo_id 为 NULL。
+        clauses.append("memo_id == null")
+
+    return combine_cel_clauses(*clauses)
+
+
 def parse_date_bound(
     raw: str | None,
     *,

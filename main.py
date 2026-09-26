@@ -15,6 +15,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 try:
     from .memos_client import MemosClient, MemosClientError
     from .tool_models import (
+        build_attachment_filter_clause,
         build_timestamp_clause,
         combine_cel_clauses,
         map_date_field_to_cel,
@@ -28,6 +29,7 @@ try:
 except ImportError:
     from memos_client import MemosClient, MemosClientError
     from tool_models import (
+        build_attachment_filter_clause,
         build_timestamp_clause,
         combine_cel_clauses,
         map_date_field_to_cel,
@@ -44,7 +46,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "2.2.0",
+    "2.2.1",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -1087,32 +1089,139 @@ class MemosManagerPlugin(Star):
                 "errors": [str(exc)],
             }
 
-    async def run_file_list(self, name: str) -> dict[str, Any]:
-        """列出指定 memo 当前绑定的附件。"""
+    async def run_file_list(
+        self,
+        name: str | None = None,
+        *,
+        query: str | None = None,
+        image_only: bool = False,
+        unbound_only: bool = False,
+    ) -> dict[str, Any]:
+        """列出附件。
+
+        - 指定 `name`（memos/xxx）：列出该 memo 绑定的附件。
+        - 未指定 `name`：自动降级为**全局附件搜索**（GET /api/v1/attachments），
+          此时 query / image_only / unbound_only 生效。
+
+        注意：全局搜索只返回当前 token 用户自己创建的附件，结果按更新时间倒序。
+        """
         trace_id = self._trace_id()
         steps: list[str] = []
         try:
-            memo_name = str(name or "").strip()
-            if not memo_name.startswith("memos/"):
-                return self._tool_input_error(
-                    trace_id=trace_id,
-                    code="invalid_memo_name",
-                    message="memo name 必须以 memos/ 开头，例如 memos/xxxx",
-                )
-
-            steps.append(f"start memos_file list trace={trace_id} memo={memo_name}")
+            memo_name = self._parse_optional_text(name)
             client = self._build_client()
-            attachments = await client.list_memo_attachments(memo_name)
-            steps.append(f"list_done count={len(attachments)}")
+
+            if memo_name:
+                if not memo_name.startswith("memos/"):
+                    return self._tool_input_error(
+                        trace_id=trace_id,
+                        code="invalid_memo_name",
+                        message="memo name 必须以 memos/ 开头，例如 memos/xxxx",
+                    )
+
+                steps.append(f"start memos_file list trace={trace_id} mode=memo memo={memo_name}")
+                attachments = await client.list_memo_attachments(memo_name)
+                steps.append(f"list_done count={len(attachments)}")
+                result: dict[str, Any] = {
+                    "query_mode": "memo",
+                    "memo": memo_name,
+                    "count": len(attachments),
+                    "attachments": attachments,
+                }
+                if query or image_only or unbound_only:
+                    # memo 模式下服务端不支持这些筛选，明确告知避免误判。
+                    result["note"] = (
+                        "query/image_only/unbound_only 仅在未指定 name 的全局搜索中生效，"
+                        "本次已忽略。"
+                    )
+                return {
+                    "ok": True,
+                    "trace_id": trace_id,
+                    "result": result,
+                    "audit": self._build_audit(trace_id, steps),
+                    "errors": [],
+                }
+
+            # ---- 全局模式：自动降级 ----
+            search_max_count = self._cfg_int("search_max_count", 50)
+            if search_max_count <= 0:
+                search_max_count = 50
+            # 服务端 pageSize 上限为 1000，避免被静默收敛。
+            page_size = max(1, min(search_max_count, 1000))
+            filter_cel = build_attachment_filter_clause(
+                query=query,
+                image_only=image_only,
+                unbound_only=unbound_only,
+            )
+            steps.append(
+                f"start memos_file list trace={trace_id} mode=global "
+                f"limit={search_max_count} filter={filter_cel!r}"
+            )
+
+            collected: list[dict[str, Any]] = []
+            page_token: str | None = None
+            page_count = 0
+            scanned_count = 0
+            truncated = False
+
+            while True:
+                page_count += 1
+                page, next_page_token = await client.list_attachments(
+                    page_size=page_size,
+                    page_token=page_token,
+                    filter_cel=filter_cel,
+                )
+                if not page:
+                    break
+                scanned_count += len(page)
+
+                remaining = search_max_count - len(collected)
+                collected.extend(page[:remaining])
+
+                if len(collected) >= search_max_count:
+                    # 达到上限：当前页没取完，或服务端还有下一页，都算截断。
+                    truncated = len(page) > remaining or bool(next_page_token)
+                    steps.append("stop_reason=reach_search_max_count")
+                    break
+                if not next_page_token:
+                    steps.append("stop_reason=no_more_pages")
+                    break
+                page_token = next_page_token
+
+            steps.append(
+                f"global_done pages={page_count} scanned={scanned_count} final={len(collected)}"
+            )
+            logger.info(
+                "[memos_file] trace=%s list global ok returned=%d",
+                trace_id,
+                len(collected),
+            )
             return {
                 "ok": True,
                 "trace_id": trace_id,
                 "result": {
-                    "memo": memo_name,
-                    "count": len(attachments),
-                    "attachments": attachments,
+                    "query_mode": "global",
+                    "search_max_count": search_max_count,
+                    "matched_count": len(collected),
+                    "truncated": truncated,
+                    "attachments": collected,
+                    "note": (
+                        "全局搜索只包含当前令牌用户自己创建的附件，"
+                        "结果按更新时间倒序（Memos v0.31 的服务端忽略 orderBy）。"
+                    ),
                 },
-                "audit": self._build_audit(trace_id, steps),
+                "audit": self._build_audit(
+                    trace_id,
+                    steps,
+                    metrics={
+                        "query_mode": "global",
+                        "filter_cel": filter_cel,
+                        "page_count": page_count,
+                        "scanned_count": scanned_count,
+                        "matched_count": len(collected),
+                        "truncated": truncated,
+                    },
+                ),
                 "errors": [],
             }
         except MemosClientError as exc:
@@ -1158,6 +1267,12 @@ class MemosManagerPlugin(Star):
         steps: list[str] = []
         try:
             memo_name = str(name or "").strip()
+            if not memo_name:
+                return self._tool_input_error(
+                    trace_id=trace_id,
+                    code="missing_memo_name",
+                    message="name is required（删除附件必须明确指定 memo，不支持全局删除）",
+                )
             if not memo_name.startswith("memos/"):
                 return self._tool_input_error(
                     trace_id=trace_id,
@@ -1454,8 +1569,10 @@ class MemosDeleteTool(BaseMemosTool):
 class MemosFileTool(BaseMemosTool):
     name = "memos_file"
     description = (
-        "管理笔记的图片附件：把图片上传并绑定到指定笔记、列出笔记的附件、或从笔记删除附件。"
+        "管理笔记的图片附件：把图片上传并绑定到指定笔记、列出附件、或从笔记删除附件。"
         "本工具只操作附件，不会修改笔记正文；编辑文字请使用 memos_update。"
+        "list 不指定 name 时会在全部附件中搜索（仅限于当前令牌用户自己创建的附件，"
+        "结果按更新时间倒序）。"
     )
     parameters = {
         "type": "object",
@@ -1467,7 +1584,10 @@ class MemosFileTool(BaseMemosTool):
             },
             "name": {
                 "type": "string",
-                "description": "笔记资源名，例如 memos/xxxx。",
+                "description": (
+                    "笔记资源名，例如 memos/xxxx。"
+                    "action=upload/remove 时必填；action=list 时可省略，省略即在全部附件中搜索。"
+                ),
             },
             "url": {
                 "type": "string",
@@ -1488,8 +1608,22 @@ class MemosFileTool(BaseMemosTool):
                 "type": "string",
                 "description": "附件资源名，例如 attachments/xxxx。action=remove 时优先使用。",
             },
+            "query": {
+                "type": "string",
+                "description": "可选：按文件名关键词搜索。action=list 且未指定 name 时生效。",
+            },
+            "image_only": {
+                "type": "boolean",
+                "description": "可选：只返回图片类附件。action=list 且未指定 name 时生效。",
+                "default": False,
+            },
+            "unbound_only": {
+                "type": "boolean",
+                "description": "可选：只返回未绑定到任何笔记的附件。action=list 且未指定 name 时生效。",
+                "default": False,
+            },
         },
-        "required": ["action", "name"],
+        "required": ["action"],
     }
 
     async def _handle_upload(
@@ -1512,6 +1646,14 @@ class MemosFileTool(BaseMemosTool):
             filename=kwargs.get("filename"),
         )
 
+    async def _handle_list(self, kwargs: dict[str, Any]) -> ToolExecResult:
+        return await self.plugin.run_file_list(
+            name=kwargs.get("name"),
+            query=kwargs.get("query"),
+            image_only=self.plugin._parse_bool_with_default(kwargs.get("image_only"), False),
+            unbound_only=self.plugin._parse_bool_with_default(kwargs.get("unbound_only"), False),
+        )
+
     async def call(
         self,
         context: ContextWrapper[AstrAgentContext],
@@ -1525,7 +1667,7 @@ class MemosFileTool(BaseMemosTool):
         if action == "upload":
             return await self._handle_upload(context, kwargs)
         if action == "list":
-            return await self.plugin.run_file_list(name=str(kwargs.get("name", "")))
+            return await self._handle_list(kwargs)
         if action == "remove":
             return await self._handle_remove(kwargs)
 

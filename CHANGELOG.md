@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.2.1 - 2026-09-26
+
+`memos_file` 的 `list` 支持全局附件搜索：省略 `name` 时自动降级。
+
+### 新增
+
+- `memos_file` 在 `action=list` 且**省略 `name`** 时，自动降级为全局附件搜索，调用 `GET /api/v1/attachments`。
+- 全局搜索新增三个筛选参数：
+  - `query`：按文件名关键词匹配；
+  - `image_only`：只返回 `image/*` 附件；
+  - `unbound_only`：只返回未绑定到任何笔记的附件（`memo_id == null`）。
+- 全局模式自动翻页，返回上限复用 `search_max_count`，结果带 `matched_count` 与 `truncated` 标记。
+
+### 变更
+
+- `memos_file` 的 `required` 从 `["action", "name"]` 调整为 `["action"]`；`name` 对 `upload`/`remove` 仍为必填，对 `list` 可省略。
+- 在 `name` 已指定时同时传入筛选参数，会在结果中提示这些参数仅在全局搜索时生效（服务端不支持按 memo 筛选）。
+
+### 说明
+
+- **全局搜索只返回当前令牌用户自己创建的附件**：服务端在 `ListAttachments` 中把范围硬编码为附件创建者，实例管理员也看不到他人上传的文件。
+- 全局搜索**不发送 `orderBy`**：Memos v0.31 虽在 proto/OpenAPI 中声明了该参数，但服务端实现完全忽略它，结果固定按更新时间倒序。
+
 ## v2.2.0 - 2026-09-25
 
 新增独立的文件（附件）管理工具 `memos_file`，与 `memos_update` 的文字编辑职责分离。

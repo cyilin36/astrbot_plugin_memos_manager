@@ -412,6 +412,42 @@ class MemosClient:
         )
         return self._sanitize_attachment(data)
 
+    async def list_attachments(
+        self,
+        *,
+        page_size: int,
+        page_token: str | None = None,
+        filter_cel: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """全局列出附件（不限定某条 memo）。
+
+        v0.31 注意：
+        - 服务端把结果收窄为**当前 token 用户自己创建的附件**，再叠加 memo
+          可见性范围，因此这不是“全站附件”，管理员也看不到他人上传的文件。
+        - `orderBy` 虽然存在于 proto/OpenAPI，但服务端实现完全未使用，
+          结果固定按 `updated_ts DESC` 排序，故这里刻意不传该参数。
+        - `filter` 支持 filename / mime_type / create_time / memo_id / space。
+        """
+        params: dict[str, Any] = {
+            "pageSize": max(1, int(page_size)),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        if filter_cel:
+            params["filter"] = filter_cel
+        data = await self._request("GET", "/attachments", params=params)
+        attachments = data.get("attachments", [])
+        if not isinstance(attachments, list):
+            raise MemosClientError("invalid attachments list in list_attachments")
+        next_page_token = data.get("nextPageToken")
+        if not isinstance(next_page_token, str) or not next_page_token:
+            next_page_token = None
+        return [
+            self._sanitize_attachment(item)
+            for item in attachments
+            if isinstance(item, dict)
+        ], next_page_token
+
     async def list_memo_attachments(self, memo_name: str) -> list[dict[str, Any]]:
         """列出某条 memo 当前绑定的全部附件。"""
         self._require_memo_prefix(memo_name)
