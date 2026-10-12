@@ -43,6 +43,7 @@ class MemosClient:
 
     只使用 v0.31 仍然存在的公开路由：
     - GET    /api/v1/memos
+    - GET    /api/v1/memos/{memo}
     - POST   /api/v1/memos
     - PATCH  /api/v1/memos/{memo}
     - DELETE /api/v1/memos/{memo}
@@ -282,6 +283,15 @@ class MemosClient:
             filter_cel=filter_cel,
         )
         return memos[:limit]
+
+    async def get_memo(self, name: str) -> dict[str, Any]:
+        """读取单条笔记（`GET /api/v1/{name=memos/*}`）。
+
+        覆写正文前的「先读后写」护栏依赖该接口拿到当前版本（`update_time` + 正文）。
+        """
+        self._require_memo_prefix(name)
+        data = await self._request("GET", f"/{name}")
+        return self._sanitize_memo(data)
 
     async def create_memo(
         self,

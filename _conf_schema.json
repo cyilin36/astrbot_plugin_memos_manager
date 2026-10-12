@@ -46,6 +46,12 @@
     "hint": "先使用命令 /sid 获取 UID，再点击“修改/添加”逐条录入；如需批量添加，在弹窗中使用“批量导入”，每行一个 UID（精确匹配，区分大小写）。",
     "default": []
   },
+  "enable_memo_overwrite_read_guard": {
+    "type": "bool",
+    "description": "覆写笔记正文前是否要求先检索读取",
+    "hint": "开启后 memos_update 覆写 content 前，必须先通过 memos_search（已归档用 memos_archive 的 list_archived）读到该笔记；笔记自读取后被修改需重新检索。仅拦正文覆写，改可见性/置顶不受影响。",
+    "default": true
+  },
   "enable_memos_delete_tool": {
     "type": "bool",
     "description": "是否启用 memos_delete 工具（默认关闭）",

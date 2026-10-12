@@ -14,6 +14,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 try:
     from .memos_client import MemosClient, MemosClientError
+    from .read_guard import MemoReadGuard, memo_version
     from .tool_models import (
         build_attachment_filter_clause,
         build_timestamp_clause,
@@ -28,6 +29,7 @@ try:
     )
 except ImportError:
     from memos_client import MemosClient, MemosClientError
+    from read_guard import MemoReadGuard, memo_version
     from tool_models import (
         build_attachment_filter_clause,
         build_timestamp_clause,
@@ -46,7 +48,7 @@ except ImportError:
     "astrbot_plugin_memos_manager",
     "astrbot_plugin_memos_manager",
     "一个能对usememos/memos进行管理的插件",
-    "2.2.1",
+    "2.3.0",
     "https://github.com/cyilin36/astrbot_plugin_memos_manager",
 )
 class MemosManagerPlugin(Star):
@@ -66,6 +68,11 @@ class MemosManagerPlugin(Star):
         # 新版改用 AstrBot list 配置项。若存量配置仍是字符串，这里拆成真正的
         # UID 列表并写回配置文件，避免 WebUI 列表编辑器把字符串逐字拆成条目。
         self._migrate_allowed_uids_config()
+
+        # 覆写正文前的「先读后写」观察记录（语义对齐 DSH 文件观察策略）：
+        # 把该 memo 的完整内容交给过模型的检索结果（memos_search /
+        # memos_archive 的 list_archived）即算已读取，覆写正文时才放行。
+        self._read_guard = MemoReadGuard()
 
         # 注册给 Agent 可自动调用的工具。
         tools = [
@@ -250,6 +257,39 @@ class MemosManagerPlugin(Star):
                     return uid
         return None
 
+    @staticmethod
+    def _iter_events_from_ctx(context: Any):
+        """按稳定性顺序枚举 tool 上下文里可用的事件对象。
+
+        与 `_extract_uid_from_ctx` 的取值路径保持一致，但这里需要拿到
+        `unified_msg_origin` 作为会话作用域，因此逐个返回候选事件。
+        """
+        for holder, attr in (
+            (getattr(context, "context", None), "event"),
+            (context, "event"),
+            (getattr(context, "run_context", None), "event"),
+        ):
+            if holder is None:
+                continue
+            event = getattr(holder, attr, None)
+            if event is not None:
+                yield event
+
+    def _session_scope(self, context: Any) -> str:
+        """推导「先读后写」观察记录的会话作用域。
+
+        优先使用 `unified_msg_origin`（同一会话内共享观察记录，符合 DSH 的
+        「观察记录属于会话」语义）；取不到时退化到 UID，最后退化为全局。
+        """
+        for event in self._iter_events_from_ctx(context):
+            umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+            if umo:
+                return f"session:{umo}"
+        uid = self._extract_uid_from_ctx(context) if context is not None else None
+        if uid:
+            return f"uid:{uid}"
+        return "global"
+
     def _check_tool_permission(
         self,
         context: ContextWrapper[AstrAgentContext],
@@ -312,6 +352,32 @@ class MemosManagerPlugin(Star):
             "trace_id": trace_id,
             "result": {},
             "audit": self._build_audit(trace_id, steps),
+            "errors": [message],
+        }
+
+    def _overwrite_blocked_result(
+        self,
+        trace_id: str,
+        *,
+        reason: str,
+        name: str,
+        message: str,
+        steps: list[str],
+    ) -> dict[str, Any]:
+        """生成「先读后写」护栏的拒绝返回。
+
+        与 DSH 一致：错误码与恢复指引同时给出，模型据此知道要先检索到
+        目标笔记、确认当前内容后再覆写。
+        """
+        return {
+            "ok": False,
+            "trace_id": trace_id,
+            "result": {
+                "name": name,
+                "required_tool": "memos_search",
+                "blocked_reason": reason,
+            },
+            "audit": self._build_audit(trace_id, steps + [f"overwrite_blocked reason={reason}"]),
             "errors": [message],
         }
 
@@ -388,6 +454,7 @@ class MemosManagerPlugin(Star):
         start_date: str | None = None,
         end_date: str | None = None,
         date_field: str = "create_time",
+        context: ContextWrapper[AstrAgentContext] | None = None,
     ) -> dict[str, Any]:
         """执行 memos 搜索（Memos v0.31）。
 
@@ -396,6 +463,9 @@ class MemosManagerPlugin(Star):
         2) 服务端按 CEL 分页返回（固定 pageSize，避免 pageToken 失效）
         3) 插件侧关键词过滤 content/snippet/tags
         4) 可见性兜底校验并截断到 search_max_count
+
+        返回给模型的每条 memo 都带完整 `content`，因此搜索本身即「读取」：
+        这里会为返回的条目登记观察记录，作为覆写正文的前置条件。
         """
         trace_id = self._trace_id()
         steps: list[str] = []
@@ -491,6 +561,14 @@ class MemosManagerPlugin(Star):
                 f"final={len(result_memos)}"
             )
 
+            # 登记「已读取」观察：随结果返回给模型的条目已包含完整正文。
+            read_scope = self._session_scope(context)
+            for memo in result_memos:
+                memo_name = str(memo.get("name", "") or "")
+                if memo_name:
+                    self._read_guard.observe(read_scope, memo_name, memo_version(memo))
+            steps.append(f"read_observed count={len(result_memos)}")
+
             logger.info(f"[memos_search] trace={trace_id} ok returned={len(result_memos)}")
             return {
                 "ok": True,
@@ -555,6 +633,7 @@ class MemosManagerPlugin(Star):
                 "errors": [f"unexpected error: {exc}"],
             }
 
+
     async def run_create(self, content: str, visibility: str | None = None) -> dict[str, Any]:
         """创建 memo，未指定可见性时使用默认配置。"""
         trace_id = self._trace_id()
@@ -611,8 +690,15 @@ class MemosManagerPlugin(Star):
         content: str | None = None,
         visibility: str | None = None,
         pinned: bool | None = None,
+        context: ContextWrapper[AstrAgentContext] | None = None,
     ) -> dict[str, Any]:
-        """更新 memo 的内容、可见性和置顶状态。"""
+        """更新 memo 的内容、可见性和置顶状态。
+
+        覆写正文（`content`）时启用「先读后写」护栏，语义对齐 DSH 文件观察策略：
+        必须先从检索结果里读过该 memo 的完整内容（`memos_search`，已归档笔记用
+        `memos_archive` 的 list_archived），且读取后未被外部修改，才允许覆写；
+        覆写成功后刷新观察记录，因此同一会话内可连续覆写而无需反复读取。
+        """
         trace_id = self._trace_id()
         steps: list[str] = []
         try:
@@ -635,12 +721,73 @@ class MemosManagerPlugin(Star):
                     "errors": ["at least one of content/visibility/pinned is required"],
                 }
 
+            guard_scope: str | None = None
+            client: MemosClient | None = None
+            guard_active = content is not None and self._cfg_bool(
+                "enable_memo_overwrite_read_guard", True
+            )
+
+            if guard_active:
+                guard_scope = self._session_scope(context)
+                observed_version = self._read_guard.observed_version(guard_scope, name)
+                if observed_version is None:
+                    steps.append(
+                        f"start memos_update trace={trace_id} name={name} guard=not_read"
+                    )
+                    logger.info(
+                        "[memos_update] trace=%s blocked reason=not_read memo=%s",
+                        trace_id,
+                        name,
+                    )
+                    return self._overwrite_blocked_result(
+                        trace_id,
+                        reason="not_read",
+                        name=name,
+                        message=(
+                            f"覆写笔记正文前必须先读取该笔记：请先调用 memos_search "
+                            f"检索到该笔记（例如按关键词或日期范围），确认返回的当前内容后"
+                            f"再调用 memos_update 覆写 {name}。"
+                        ),
+                        steps=steps,
+                    )
+
+                # 新鲜度校验：对齐 DSH 的 `FS_STALE_VERSION`。
+                client = self._build_client()
+                current_memo = await client.get_memo(name)
+                current_version = memo_version(current_memo)
+                if current_version != observed_version:
+                    steps.append(
+                        f"start memos_update trace={trace_id} name={name} guard=stale_version"
+                    )
+                    logger.info(
+                        "[memos_update] trace=%s blocked reason=stale_version memo=%s",
+                        trace_id,
+                        name,
+                    )
+                    return self._overwrite_blocked_result(
+                        trace_id,
+                        reason="stale_version",
+                        name=name,
+                        message=(
+                            f"笔记自上次读取后已被修改：请重新用 memos_search 检索并读取 "
+                            f"{name} 的最新内容，然后再覆写。"
+                        ),
+                        steps=steps,
+                    )
+                steps.append(f"overwrite_guard_passed version={current_version}")
+
             steps.append(
                 f"start memos_update trace={trace_id} name={name} fields={','.join(update_payload.keys())}"
             )
-            client = self._build_client()
+            if client is None:
+                client = self._build_client()
             memo = await client.update_memo(name=name, updates=update_payload)
             steps.append("update_done")
+            if guard_active and guard_scope is not None:
+                # 成功的覆写本身已提交，用服务端返回的新版本刷新观察记录，
+                # 因此同一会话内读取一次后可连续覆写（与 DSH 一致）。
+                self._read_guard.observe(guard_scope, name, memo_version(memo))
+                steps.append("overwrite_guard_refreshed")
             logger.info(f"[memos_update] trace={trace_id} ok memo={name}")
             return {
                 "ok": True,
@@ -770,6 +917,7 @@ class MemosManagerPlugin(Star):
         start_date: str | None = None,
         end_date: str | None = None,
         date_field: str = "create_time",
+        context: ContextWrapper[AstrAgentContext] | None = None,
     ) -> dict[str, Any]:
         """查询已归档 memo 列表。"""
         search_result = await self.run_search(
@@ -778,6 +926,7 @@ class MemosManagerPlugin(Star):
             start_date=start_date,
             end_date=end_date,
             date_field=date_field,
+            context=context,
         )
         if not search_result.get("ok"):
             return search_result
@@ -1461,6 +1610,7 @@ class MemosSearchTool(BaseMemosTool):
             start_date=kwargs.get("start_date"),
             end_date=kwargs.get("end_date"),
             date_field=selected_date_field,
+            context=context,
         )
 
 
@@ -1499,7 +1649,12 @@ class MemosCreateTool(BaseMemosTool):
 
 class MemosUpdateTool(BaseMemosTool):
     name = "memos_update"
-    description = "更新笔记内容、可见性或置顶状态。"
+    description = (
+        "更新笔记内容、可见性或置顶状态。"
+        "覆写正文（content）前必须先用 memos_search 检索到该笔记并确认当前内容"
+        "（已归档笔记用 memos_archive 的 list_archived），否则会被拒绝；"
+        "笔记自读取后若被修改，也需要重新检索后再覆写。"
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -1509,7 +1664,7 @@ class MemosUpdateTool(BaseMemosTool):
             },
             "content": {
                 "type": "string",
-                "description": "可选：更新后的正文。",
+                "description": "可选：更新后的正文。覆写正文前必须先用 memos_search 读到该笔记。",
             },
             "visibility": {
                 "type": "string",
@@ -1537,6 +1692,7 @@ class MemosUpdateTool(BaseMemosTool):
             content=kwargs.get("content"),
             visibility=kwargs.get("visibility"),
             pinned=kwargs.get("pinned"),
+            context=context,
         )
 
 
@@ -1720,13 +1876,18 @@ class MemosArchiveTool(BaseMemosTool):
         "required": [],
     }
 
-    async def _handle_archive_list(self, kwargs: dict[str, Any]) -> ToolExecResult:
+    async def _handle_archive_list(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        kwargs: dict[str, Any],
+    ) -> ToolExecResult:
         selected_date_field = self.plugin._parse_date_field(kwargs.get("date_field", "create_time"))
         return await self.plugin.run_archive_list(
             query=self.plugin._parse_optional_text(kwargs.get("query")),
             start_date=kwargs.get("start_date"),
             end_date=kwargs.get("end_date"),
             date_field=selected_date_field,
+            context=context,
         )
 
     async def _handle_archive_set(self, kwargs: dict[str, Any]) -> ToolExecResult:
@@ -1756,7 +1917,7 @@ class MemosArchiveTool(BaseMemosTool):
 
         action = self.plugin._parse_action(kwargs.get("action", "set"))
         if action == "list_archived":
-            return await self._handle_archive_list(kwargs)
+            return await self._handle_archive_list(context, kwargs)
 
         if action != "set":
             trace_id = self.plugin._trace_id()

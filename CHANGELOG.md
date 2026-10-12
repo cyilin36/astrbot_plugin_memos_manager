@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.3.0 - 2026-10-12
+
+覆写 memo 正文前新增「先读后写」护栏：先检索读到目标笔记，才允许覆写。
+
+### 新增
+
+- 覆写正文前的护栏（语义对齐 DSH 文件观察策略）：
+  - 未读到目标笔记就调用 `memos_update` 覆写 `content`，拒绝并提示先检索（`blocked_reason=not_read`）；
+  - 笔记自读取后已被修改，拒绝并要求重新检索（`blocked_reason=stale_version`）；
+  - 覆写成功后刷新观察记录，同一会话内读取一次即可连续覆写，无需反复检索。
+- `memos_search`（含 `memos_archive` 的 `list_archived`）返回的每条笔记连同完整正文登记为「已读」。
+- 新增配置项 `enable_memo_overwrite_read_guard`：是否启用该护栏（默认 `true`）。
+
+### 变更
+
+- `memos_update` 的工具描述与 `content` 参数说明补充「覆写正文前需先检索读取」。
+
+### 说明
+
+- 仅拦正文覆写；仅修改 `visibility` / `pinned` / 归档不受影响。
+- 观察记录按会话（`unified_msg_origin`，退化到 UID）隔离且不持久化，TTL 为 6 小时。
+- Memos REST API 无原子 CAS，新鲜度校验为「读取后版本比对 + PATCH」，存在极小的并发竞态窗口。
+
 ## v2.2.1 - 2026-09-26
 
 `memos_file` 的 `list` 支持全局附件搜索：省略 `name` 时自动降级。
